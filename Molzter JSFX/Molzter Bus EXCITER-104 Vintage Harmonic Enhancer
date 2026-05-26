@@ -1,0 +1,64 @@
+desc: Molzter Bus EXCITER-104 
+author: Molzter
+version: 1.0
+
+slider1:0<0,10,0.05> Big Bass: Drive
+slider2:80<50,150,1> Big Bass: Freq (Hz)
+slider3:0<0,100,1> Big Bass: Mix (%)
+slider4:5<0,10,0.05> Exciter: Harmonics
+slider5:3000<1000,10000,10> Exciter: Freq (Hz)
+slider6:0<0,100,1> Exciter: Mix (%)
+slider7:0<0,100,1> Total Wet Mix (%)
+slider8:0<-12,12,0.1> Output Level (dB)
+slider11:50<0,100,1> Adv: Saturation Amount (%)
+slider12:0<0,1,1{Off, On}> Adv: Mono Bass Shunt
+slider13:1<0,1,1{12dB/Oct, 24dB/Oct}> Adv: Filter Slope
+
+@init
+function fast_tanh(x) (
+  exp_val = exp(2.0 * x);
+  (exp_val - 1.0) / (exp_val + 1.0);
+);
+
+function sat_engine(x, drive, sat_pct) (
+  clean = x;
+  saturated = fast_tanh(x * drive);
+  clean + (saturated - clean) * (sat_pct / 100);
+);
+
+hp_l1=hp_l2=lp_l1=lp_l2=0;
+
+@slider
+bb_drive = 10 ^ (slider1 / 20);
+bb_mix = slider3 / 100;
+exc_harm = slider4 * 1.5;
+exc_mix = slider6 / 100;
+master_gain = 10 ^ (slider8 / 20);
+
+// Filter Coeffs
+w0_b = 2.0 * $pi * slider2 / srate; alpha_b = sin(w0_b) / (2.0 * 0.707); cos_wb = cos(w0_b);
+b0_b = (1.0 - cos_wb) / 2.0; b1_b = 1.0 - cos_wb; b2_b = b0_b; a0_b = 1.0 + alpha_b; a1_b = -2.0 * cos_wb; a2_b = 1.0 - alpha_b;
+
+w0_e = 2.0 * $pi * slider5 / srate; alpha_e = sin(w0_e) / (2.0 * (slider13 == 1 ? 0.9 : 0.5)); cos_we = cos(w0_e);
+b0_e = (1.0 + cos_we) / 2.0; b1_e = -(1.0 + cos_we); b2_e = b0_e; a0_e = 1.0 + alpha_e; a1_e = -2.0 * cos_we; a2_e = 1.0 - alpha_e;
+
+@sample
+s0 = spl0; s1 = spl1;
+
+// Bass Path
+y_b = (b0_b*s0 + b1_b*lp_l1 + b2_b*lp_l2 - a1_b*lp_l1 - a2_b*lp_l2) / a0_b;
+lp_l2 = lp_l1; lp_l1 = s0;
+bass_out = sat_engine(y_b, bb_drive, slider11);
+
+// Exciter Path
+y_e = (b0_e*s0 + b1_e*hp_l1 + b2_e*hp_l2 - a1_e*hp_l1 - a2_e*hp_l2) / a0_e;
+hp_l2 = hp_l1; hp_l1 = s0;
+exc_out = sat_engine(y_e * exc_harm, 1.2, slider11);
+
+// Final Output
+wet_l = s0 + (bass_out * bb_mix) + (exc_out * exc_mix);
+spl0 = wet_l * master_gain;
+spl1 = spl0;
+
+@gfx 0 0
+// GUI disabled to prevent flickering

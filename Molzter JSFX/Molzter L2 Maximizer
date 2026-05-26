@@ -1,0 +1,208 @@
+desc: Molzter L2 Ultramaximizer
+author: Molzter
+version: 1.0
+
+slider1:0<-30,0,0.1>Threshold (dB)
+slider2:0<-30,0,0.1>Ceiling (dB)
+slider3:1<0.1,500,0.1>Release Time (ms)
+slider4:1<0,1,1{Manual,ARC}>Release Mode
+
+@init
+// Constants and memory definitions
+MAX_DELAY = 9600; // Look-ahead buffer maximum depth
+buffer_l = 0;
+buffer_r = buffer_l + MAX_DELAY;
+
+// L2 uses a fixed 0.5ms look-ahead time
+lookahead_ms = 0.5;
+delay_samples = floor((lookahead_ms / 1000) * srate);
+
+// Initialize delay line indexes
+buf_write = 0;
+
+// Filter/smoothing coefficient variables for gain reduction envelopes
+g_envelope = 1.0;
+meter_gr = 0.0; // Captures maximum reduction for the UI meter
+
+@slider
+// Convert dB interface values to raw amplitude coefficients
+thresh_amp = exp(slider1 * 0.1151292546);
+ceiling_amp = exp(slider2 * 0.1151292546);
+
+// Calculate default look-ahead attenuation recovery profile coefficients
+rel_time_ms = slider3;
+rel_coeff = 1.0 - exp(-1.0 / ((rel_time_ms / 1000) * srate));
+
+@sample
+// 1. Write current input directly to look-ahead memory lines
+buffer_l[buf_write] = spl0;
+buffer_r[buf_write] = spl1;
+
+// 2. Read the historical sample from look-ahead memory (0.5ms in the past)
+buf_read = buf_write - delay_samples;
+buf_read < 0 ? buf_read += MAX_DELAY;
+
+delayed_l = buffer_l[buf_read];
+delayed_r = buffer_r[buf_read];
+
+// 3. Peak Detection (Instantaneous lookahead amplitude tracking)
+// We analyze the present sample to predict and smooth for the delayed playback stream
+peak_now = max(abs(spl0), abs(spl1));
+
+// Target gain needed to squeeze this peak down to our absolute ceiling
+target_gain = 1.0;
+peak_now > thresh_amp ? (
+  target_gain = thresh_amp / peak_now;
+);
+
+// 4. Automatic Release Control (ARC) vs Manual Release Engine
+slider4 == 1 ? (
+  // ARC dynamic behavior modifier:
+  // If the audio signal contains deep transients, shorten release for transparency.
+  // If long RMS content stays loud, expand release to prevent pumping.
+  arc_mod = max(0.2, min(2.0, peak_now));
+  current_rel = rel_coeff * (1.0 / arc_mod);
+) : (
+  current_rel = rel_coeff;
+);
+
+// Smooth out the gain attenuation envelope
+target_gain < g_envelope ? (
+  // Attack is instantaneous to ensure absolute brickwall clamping
+  g_envelope = target_gain;
+) : (
+  // Release follows calculated time constants back toward unity gain
+  g_envelope += (target_gain - g_envelope) * current_rel;
+);
+
+// Track current gain reduction for the UI display matrix (converted to dB scale)
+current_gr_db = 20 * log10(g_envelope);
+meter_gr += (current_gr_db - meter_gr) * 0.1; // Smooth meter response
+
+// 5. Apply Brickwall Attenuation and Makeup Gain
+// The classical L2 formula: (Audio * Attenuation) * Makeup Gain Factor
+// Makeup gain scale matches the inverse of the threshold value
+makeup_gain = 1.0 / thresh_amp;
+
+spl0 = delayed_l * g_envelope * makeup_gain * ceiling_amp;
+spl1 = delayed_r * g_envelope * makeup_gain * ceiling_amp;
+
+// Clip hard to protect system safety at absolute output ceiling boundaries
+spl0 = min(max(spl0, -ceiling_amp), ceiling_amp);
+spl1 = min(max(spl1, -ceiling_amp), ceiling_amp);
+
+// Cycle circular buffer block pointer indices
+buf_write += 1;
+buf_write >= MAX_DELAY ? buf_write = 0;
+
+@gfx 400 320
+// --- GRAPHICAL USER INTERFACE ENGINE ---
+gfx_clear = 2105376; // Deep slate black backdrop gray
+
+// Draw Outer Frame Canvas Accent Lines
+gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.35; gfx_a = 1;
+gfx_rect(10, 10, gfx_w - 20, gfx_h - 20, 0);
+
+// Header Title Block Text
+gfx_r = 0.8; gfx_g = 0.8; gfx_b = 0.85;
+gfx_setfont(1, "Arial", 16, 'b');
+gfx_x = 25; gfx_y = 25;
+gfx_drawstr("L2 ULTRA-MAXIMIZER");
+
+gfx_setfont(2, "Arial", 12, '');
+gfx_x = 25; gfx_y = 45;
+gfx_r = 0.5; gfx_g = 0.5; gfx_b = 0.55;
+gfx_drawstr("DSP Brickwall Look-Ahead Limiter");
+
+// --- INTERACTIVE PARAMETER CONTROL SLIDERS ---
+function draw_l2_slider(x, y, w, h, val, min_v, max_v, label, unit) local(pct, mouse_pct) (
+  // Calculate percentage fill metric values
+  pct = (val - min_v) / (max_v - min_v);
+  
+  // Track mouse updates inside interaction bounds
+  mouse_cap && mouse_x >= x && mouse_x <= x + w && mouse_y >= y && mouse_y <= y + h ? (
+    mouse_pct = (mouse_x - x) / w;
+    mouse_pct = max(0, min(1, mouse_pct));
+    val = min_v + mouse_pct * (max_v - min_v);
+  );
+  
+  // Paint Slider track elements
+  gfx_r = 0.12; gfx_g = 0.12; gfx_b = 0.15;
+  gfx_rect(x, y + 16, w, 12, 1);
+  
+  gfx_r = 0.0; gfx_g = 0.65; gfx_b = 0.9;
+  gfx_rect(x, y + 16, w * pct, 12, 1);
+  
+  // Render Labels
+  gfx_r = 0.85; gfx_g = 0.85; gfx_b = 0.9;
+  gfx_x = x; gfx_y = y;
+  gfx_drawstr(label);
+  
+  // Readout text format configurations
+  gfx_x = x + w - 60;
+  gfx_drawnumber(val, 1);
+  gfx_drawstr(unit);
+  
+  val; // Return parameter state evaluation output
+);
+
+// Inject Slider Modules to Draw Loop
+slider1 = draw_l2_slider(25, 90, 220, 40, slider1, -30, 0, "THRESHOLD", " dB");
+slider2 = draw_l2_slider(25, 150, 220, 40, slider2, -30, 0, "OUT CEILING", " dB");
+slider3 = draw_l2_slider(25, 210, 220, 40, slider3, 0.1, 200, "RELEASE TIME", " ms");
+
+// Release Mode Selection Switch Button Interaction Elements
+gfx_y = 265; gfx_x = 25;
+gfx_r = 0.85; gfx_g = 0.85; gfx_b = 0.9;
+gfx_drawstr("RELEASE MODE: ");
+
+// Click trigger evaluations for the layout button bounding boxes
+mouse_cap == 1 && mouse_y >= 262 && mouse_y <= 282 ? (
+  mouse_x >= 140 && mouse_x <= 200 ? slider4 = 0; // Manual select box
+  mouse_x >= 210 && mouse_x <= 260 ? slider4 = 1; // ARC select box
+);
+
+// Manual Mode highlight box
+slider4 == 0 ? (gfx_r = 0.0; gfx_g = 0.65; gfx_b = 0.9;) : (gfx_r = 0.2; gfx_g = 0.2; gfx_b = 0.25;);
+gfx_rect(140, 262, 60, 20, 1);
+gfx_r = 1; gfx_g = 1; gfx_b = 1; gfx_x = 148; gfx_y = 265; gfx_drawstr("Manual");
+
+// ARC Mode highlight box
+slider4 == 1 ? (gfx_r = 0.0; gfx_g = 0.65; gfx_b = 0.9;) : (gfx_r = 0.2; gfx_g = 0.2; gfx_b = 0.25;);
+gfx_rect(210, 262, 50, 20, 1);
+gfx_r = 1; gfx_g = 1; gfx_b = 1; gfx_x = 222; gfx_y = 265; gfx_drawstr("ARC");
+
+
+// --- GAIN REDUCTION ATTENUATOR VISUAL METER ---
+meter_x = gfx_w - 90;
+meter_y = 90;
+meter_w = 40;
+meter_h = 200;
+
+// Meter Background Frame Channel
+gfx_r = 0.08; gfx_g = 0.08; gfx_b = 0.1;
+gfx_rect(meter_x, meter_y, meter_w, meter_h, 1);
+
+// Compute bar length relative to logarithmic scale reduction ratios
+norm_gr = min(1, max(0, abs(meter_gr) / 20)); // Map 0 to -20dB scaling parameters
+gr_bar_h = floor(norm_gr * meter_h);
+
+// Paint Gain Reduction Level Bars (Dynamic neon amber/red alert scheme)
+gr_bar_h > 0 ? (
+  gfx_r = 0.95; gfx_g = 0.35; gfx_b = 0.1;
+  gfx_rect(meter_x, meter_y, meter_w, gr_bar_h, 1);
+);
+
+// Draw Meter Frame Overlays and Text Metadata Scale Nodes
+gfx_r = 0.4; gfx_g = 0.4; gfx_b = 0.45;
+gfx_rect(meter_x, meter_y, meter_w, meter_h, 0);
+
+gfx_x = meter_x - 35; gfx_y = meter_y; gfx_drawstr("0 dB");
+gfx_x = meter_x - 42; gfx_y = meter_y + (meter_h * 0.25) - 6; gfx_drawstr("-5 dB");
+gfx_x = meter_x - 49; gfx_y = meter_y + (meter_h * 0.5) - 6; gfx_drawstr("-10 dB");
+gfx_x = meter_x - 49; gfx_y = meter_y + (meter_h * 0.75) - 6; gfx_drawstr("-15 dB");
+gfx_x = meter_x - 49; gfx_y = meter_y + meter_h - 12; gfx_drawstr("-20 dB");
+
+gfx_x = meter_x + 6; gfx_y = meter_y + meter_h + 10;
+gfx_r = 0.7; gfx_g = 0.7; gfx_b = 0.75;
+gfx_drawstr("ATTN");

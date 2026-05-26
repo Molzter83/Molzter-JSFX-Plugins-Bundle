@@ -1,0 +1,185 @@
+desc: Molzter Liverpool Tube Compressor
+author: Molzter
+version: 1.0
+
+slider1:0<-20,20,0.1> Input Gain Drive (dB)
+slider2:5<0,10,0.1> Threshold (Scale Level)
+slider3:10<0.5,100,0.1> Attack Ballistics (ms)
+slider4:2<0,5,1{Recovery 1 (100ms), Recovery 2 (250ms), Recovery 3 (500ms), Recovery 4 (1s), Recovery 5 (2s), Recovery 6 (5s)}> Recovery Switch
+slider5:0<-20,20,0.1> Output Attenuator (dB)
+slider6:1<0,1,1{Off, On}> Mains Filament Power
+
+@init
+log2db = 8.6858896380650365530225783783321; 
+db2log = 0.11512925464970228420089957273422; 
+
+// Detector and tracking states
+env_state = 0.0;
+meter_smooth = 0.0;
+
+@slider
+in_drive = 10 ^ (slider1 / 20);
+thresh_scale = slider2;
+out_makeup = 10 ^ (slider5 / 20);
+power_on = slider6;
+
+// Map Attack Time Coefficient
+att_alpha = 1.0 - exp(-1.0 / (srate * (slider3 / 1000.0)));
+
+// Map Hardware Stepped Recovery Values to Release Time Coefficients
+slider4 == 0 ? rec_ms = 100;
+slider4 == 1 ? rec_ms = 250;
+slider4 == 2 ? rec_ms = 500;
+slider4 == 3 ? rec_ms = 1000;
+slider4 == 4 ? rec_ms = 2000;
+slider4 == 5 ? rec_ms = 5000;
+rel_alpha = 1.0 - exp(-1.0 / (srate * (rec_ms / 1000.0)));
+
+@sample
+power_on == 0 ? (
+  // True hardwire line bypass if power switch is turned off
+  spl0 = spl0;
+  spl1 = spl1;
+  env_state = 0.0;
+) : (
+  // STAGE 1: Input Transformer Line Drive & Tube Coloration
+  s0_input = spl0 * in_drive;
+  s1_input = spl1 * in_drive;
+  
+  // Asymmetric 6BC8 remote-cutoff vacuum tube saturation emulation
+  sat_clip = 0.82;
+  s0_side = s0_input > sat_clip ? sat_clip + (s0_input - sat_clip) / (1.0 + (s0_input - sat_clip)^2) : s0_input;
+  s1_side = s1_input > sat_clip ? sat_clip + (s1_input - sat_clip) / (1.0 + (s1_input - sat_clip)^2) : s1_input;
+
+  // STAGE 2: Logarithmic Peak Detection & Vari-Mu Dynamic Ratio
+  side_rect = max(abs(s0_side), abs(s1_side));
+  side_db = 20 * log10(max(0.00001, side_rect));
+  
+  // Custom Series 70 feedback threshold calculation
+  calc_threshold = -10.0 - (thresh_scale * 3.5);
+  excess_db = side_db - calc_threshold;
+  
+  target_gr = 0.0;
+  excess_db > 0.0 ? (
+    // Dynamic ratio hardens automatically the further the input drives past threshold
+    dynamic_ratio = 1.5 + (excess_db * 0.12);
+    dynamic_ratio > 5.0 ? dynamic_ratio = 5.0;
+    target_gr = excess_db * (1.0 - (1.0 / dynamic_ratio));
+  );
+  
+  // STAGE 3: Optical/Tube Ballistics Time Integration
+  env_state = target_gr > env_state ? 
+              env_state + (target_gr - env_state) * att_alpha : 
+              env_state + (target_gr - env_state) * rel_alpha;
+              
+  gr_attenuation = 10 ^ (-env_state / 20);
+  
+  // STAGE 4: Output Makeup Stage
+  spl0 = s0_side * gr_attenuation * out_makeup;
+  spl1 = s1_side * gr_attenuation * out_makeup;
+  
+  // Smooth the calculated gain reduction to feed the VU needle smoothly
+  meter_smooth = (meter_smooth * 0.85) + (env_state * 0.15);
+);
+
+// ====================================================
+// ANTELOPE LIVERPOOL MILITARY GREEN FACEPLATE DISPLAY
+// ====================================================
+@gfx 620 280
+
+// Base Rack Finish (Vintage Matte Military Olive/Drab)
+gfx_r = 0.22; gfx_g = 0.28; gfx_b = 0.24; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Outer frame structural panel bezel groove accent lines
+gfx_set(0.12, 0.16, 0.13, 0.5);
+gfx_rect(12, 12, gfx_w - 24, gfx_h - 24, 0);
+
+// ----------------------------------------------------
+// ILLUMINATED VINTAGE CREAM RADIAL VU WINDOW
+// ----------------------------------------------------
+m_w = 210; m_h = 105;
+m_x = gfx_w - m_w - 35; m_y = 35;
+needle_len = 82;
+
+gfx_set(0.08, 0.10, 0.08, 1.0); // Outer frame bezel ring
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+
+power_on == 1 ? (
+  gfx_set(0.94, 0.82, 0.45, 1.0); // Warm filament incandescent back-glow active
+) : (
+  gfx_set(0.42, 0.38, 0.25, 1.0); // Dark unlit chassis plate
+);
+gfx_rect(m_x + 5, m_y + 5, m_w - 10, m_h - 10, 1);
+
+pivot_x = m_x + (m_w / 2);
+pivot_y = m_y + m_h - 10;
+
+// Radial Deflection Vector Calculation (0dB GR stays right, compresses leftward)
+needle_clamped = min(20, meter_smooth);
+angle = -0.42 - (needle_clamped / 20) * 1.95;
+
+tip_x = pivot_x + cos(angle) * needle_len;
+tip_y = pivot_y + sin(angle) * needle_len;
+
+// Draw Calibrated Display Text inside screen
+gfx_set(0.12, 0.12, 0.12, 0.55);
+gfx_setfont(1, "Arial", 11, 'b');
+gfx_x = m_x + 22;  gfx_y = m_y + 50; gfx_drawstr("-20");
+gfx_x = m_x + 55;  gfx_y = m_y + 24; gfx_drawstr("-10");
+gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("-5");
+gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-2");
+gfx_x = m_x + 180; gfx_y = m_y + 50; gfx_drawstr("0");
+gfx_x = m_x + 15;  gfx_y = m_y + 82; gfx_drawstr("LIVERPOOL - GR (dB)");
+
+// Draw Physical Mechanical Pointer Needle
+gfx_set(0.05, 0.05, 0.05, 1.0);
+gfx_line(pivot_x, pivot_y, tip_x, tip_y, 1);
+gfx_line(pivot_x - 1, pivot_y, tip_x - 1, tip_y, 0); // Extra weight line spacing
+
+// Chassis Ruby Power Lamp Assembly
+power_on == 1 ? (
+  gfx_set(0.92, 0.15, 0.15, 1.0); // Highly luminous red glow
+  gfx_rect(m_x - 45, m_y + m_h - 22, 16, 16, 1);
+  gfx_set(1.00, 0.60, 0.60, 0.9); // Active hotspot focus reflection
+  gfx_rect(m_x - 43, m_y + m_h - 20, 12, 12, 1);
+) : (
+  gfx_set(0.28, 0.05, 0.05, 1.0); // Extinguished jewel shell
+  gfx_rect(m_x - 45, m_y + m_h - 22, 16, 16, 1);
+);
+
+// ----------------------------------------------------
+// CONTINUOUS ANALOG CONTROL VALUE READOUT FIELDS
+// ----------------------------------------------------
+gfx_set(0.12, 0.16, 0.13, 0.5);
+gfx_rect(32, 35, 290, 150, 1);
+gfx_set(0.08, 0.11, 0.09, 0.3);
+gfx_rect(32, 35, 290, 150, 0);
+
+gfx_set(0.92, 0.95, 0.92, 0.9); // Vintage cream font styling color map
+gfx_x = 48; gfx_y = 45;
+gfx_drawstr(sprintf(#, "INPUT DRIVE:   %.1f dB", slider1));
+gfx_x = 48; gfx_y = 75;  gfx_drawstr(sprintf(#, "THRESHOLD LEVEL: %.1f", slider2));
+gfx_x = 48; gfx_y = 105; gfx_drawstr(sprintf(#, "ATTACK TIME:   %.1f ms", slider3));
+gfx_x = 48; gfx_y = 135; 
+slider4 == 0 ? gfx_drawstr("RECOVERY VALUE: 100 ms") :
+slider4 == 1 ? gfx_drawstr("RECOVERY VALUE: 250 ms") :
+slider4 == 2 ? gfx_drawstr("RECOVERY VALUE: 500 ms") :
+slider4 == 3 ? gfx_drawstr("RECOVERY VALUE: 1000 ms") :
+slider4 == 4 ? gfx_drawstr("RECOVERY VALUE: 2000 ms") :
+               gfx_drawstr("RECOVERY VALUE: 5000 ms");
+
+// ----------------------------------------------------
+// FOOTER USER ACCESS CONTROL & PARAMETERS STATUS ROW
+// ----------------------------------------------------
+gfx_set(0.12, 0.16, 0.13, 0.3);
+gfx_rect(32, 205, gfx_w - 68, 42, 1);
+gfx_set(0.08, 0.11, 0.09, 0.35);
+gfx_rect(32, 205, gfx_w - 68, 42, 0);
+
+gfx_set(0.85, 0.90, 0.85, 0.85);
+gfx_x = 48; gfx_y = 219;
+power_on == 1 ? gfx_drawstr("CHASSIS FILAMENT POWER STATE: ON (ACTIVE)") : gfx_drawstr("CHASSIS FILAMENT POWER STATE: HARDWIRE BYPASS");
+
+gfx_x = gfx_w - 195;
+gfx_drawstr(sprintf(#, "OUTPUT LEVEL: %.1f dB", slider5));

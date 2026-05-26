@@ -1,0 +1,110 @@
+desc: Molzter VM-Comp Tube Vari-Mu Mastering Compressor 
+author: Molzter
+version: 1.0
+
+slider1:0<-20,20,0.1> Dual Input Drive (dB)
+slider2:0<-40,0,0.1> Threshold (dB)
+slider3:0<0,1,1{Low Ratio, Hi Ratio}> Ratio Profile Mode
+slider4:15<0.5,100,0.5> Attack Time (ms)
+slider5:2<0,4,1{100ms, 200ms, 400ms, 800ms, Auto}> Release Time
+slider6:0<0,1,1{Off, 120 Hz}> Sidechain HPF Filter
+slider7:0<-12,12,0.1> Makeup Output Gain (dB)
+slider8:100<0,100,1> Parallel Mix (%)
+
+@init
+sc_hp_l = sc_hp_r = 0;
+env_l = env_r = 0.0;
+gr_smooth_l = gr_smooth_r = 0.0;
+buf_size = 300;
+buf_idx = 0;
+memset(0, 0, buf_size * 2);
+
+@slider
+in_drive = 10 ^ (slider1 / 20);
+out_gain = 10 ^ (slider7 / 20);
+threshold_linear = 10 ^ (slider2 / 20); // Optimized: pre-calc threshold
+mix_dry = (100 - slider8) / 100;
+mix_wet = slider8 / 100;
+att_coef = exp(-1.0 / (srate * (slider4 / 1000.0)));
+slider5 == 0 ? rel_ms = 100 : slider5 == 1 ? rel_ms = 200 : slider5 == 2 ? 
+rel_ms = 400 : slider5 == 3 ? rel_ms = 800 : rel_ms = 250;
+rel_coef = exp(-1.0 / (srate * (rel_ms / 1000.0)));
+sc_rc = 1.0 / (2 * $pi * 120);
+sc_alpha = sc_rc / (sc_rc + (1.0 / srate));
+
+@sample
+dry_l = spl0; dry_r = spl1;
+in_l = spl0 * in_drive; in_r = spl1 * in_drive;
+
+// STAGE 1: Optimized Tube Saturation
+in_l -= 0.012 * (in_l * in_l * in_l);
+in_r -= 0.012 * (in_r * in_r * in_r);
+
+// STAGE 2: Sidechain
+sc_l = in_l; sc_r = in_r;
+slider6 == 1 ? (
+  sc_l = sc_alpha * (sc_l - sc_hp_l); sc_hp_l = in_l;
+  sc_r = sc_alpha * (sc_r - sc_hp_r); sc_hp_r = in_r;
+);
+
+// STAGE 3: Optimized Dynamic Vari-Mu Compression
+det_l = abs(sc_l); det_r = abs(sc_r);
+
+t_gr_l = (det_l > threshold_linear) ? 
+    (20 * log10(det_l) - slider2) * (1.0 - (1.0 / (slider3 == 0 ? 1.5 + ((20 * log10(det_l) - slider2) * 0.15) : 3.0 + ((20 * log10(det_l) - slider2) * 0.45)))) : 0;
+t_gr_r = (det_r > threshold_linear) ? 
+    (20 * log10(det_r) - slider2) * (1.0 - (1.0 / (slider3 == 0 ? 1.5 + ((20 * log10(det_r) - slider2) * 0.15) : 3.0 + ((20 * log10(det_r) - slider2) * 0.45)))) : 0;
+
+env_l = t_gr_l > env_l ? (env_l * att_coef) + (t_gr_l * (1.0 - att_coef)) : (env_l * rel_coef) + (t_gr_l * (1.0 - rel_coef));
+env_r = t_gr_r > env_r ? (env_r * att_coef) + (t_gr_r * (1.0 - att_coef)) : (env_r * rel_coef) + (t_gr_r * (1.0 - rel_coef));
+
+gr_l = 10 ^ (-env_l / 20);
+gr_r = 10 ^ (-env_r / 20);
+
+wet_l = in_l * gr_l * out_gain;
+wet_r = in_r * gr_r * out_gain;
+
+spl0 = (dry_l * mix_dry) + (wet_l * mix_wet);
+spl1 = (dry_r * mix_dry) + (wet_r * mix_wet);
+
+gr_smooth_l = (gr_smooth_l * 0.90) + (env_l * 0.10);
+gr_smooth_r = (gr_smooth_r * 0.90) + (env_r * 0.10);
+
+history_counter += 1;
+history_counter >= 80 ? (
+  history_counter = 0;
+  buf_idx[0] = gr_smooth_l;
+  buf_idx[buf_size] = gr_smooth_r;
+  buf_idx += 1;
+  buf_idx >= buf_size ? buf_idx = 0;
+);
+
+@gfx 620 280
+gfx_r = 0.08; gfx_g = 0.09; gfx_b = 0.11; gfx_a = 1.0; gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_set(0.04, 0.05, 0.06, 1.0); gfx_rect(20, 20, gfx_w - 40, 100, 1);
+gfx_set(0.18, 0.38, 0.62, 0.3); gfx_rect(20, 20, gfx_w - 40, 100, 0);
+gfx_set(1.0, 1.0, 1.0, 0.03); gfx_line(20, 45, gfx_w - 20, 45); gfx_line(20, 70, gfx_w - 20, 70); gfx_line(20, 95, gfx_w - 20, 95);
+gfx_set(0.85, 0.22, 0.25, 0.85);
+i = 0; plot_width = gfx_w - 40;
+while(i < buf_size - 1) (
+  read_idx = buf_idx + i; read_idx >= buf_size ? read_idx -= buf_size;
+  x1 = 20 + (i / buf_size) * plot_width; x2 = 20 + ((i + 1) / buf_size) * plot_width;
+  y1_l = 22 + (read_idx[0] * 3.5); y2_l = 22 + ((read_idx + 1)[0] * 3.5);
+  y1_l > 118 ? y1_l = 118; y2_l > 118 ? y2_l = 118;
+  gfx_line(x1, y1_l, x2, y2_l); i += 1;
+);
+meter_h = 90; meter_w = 30;
+gfx_set(0.04, 0.05, 0.06, 1.0); gfx_rect(50, 150, meter_w, meter_h, 1);
+gfx_set(0.18, 0.45, 0.75, 0.85);
+val_h_l = min(meter_h, (gr_smooth_l / 20) * meter_h); gfx_rect(50, 150, meter_w, val_h_l, 1);
+gfx_set(0.04, 0.05, 0.06, 1.0); gfx_rect(100, 150, meter_w, meter_h, 1);
+gfx_set(0.18, 0.45, 0.75, 0.85);
+val_h_r = min(meter_h, (gr_smooth_r / 20) * meter_h); gfx_rect(100, 150, meter_w, val_h_r, 1);
+gfx_set(1.0, 1.0, 1.0, 0.3);
+gfx_x = 145; gfx_y = 150; gfx_drawstr("0 dB"); gfx_x = 145; gfx_y = 172; gfx_drawstr("-3 dB"); gfx_x = 145; gfx_y = 195; gfx_drawstr("-6 dB"); gfx_x = 145; gfx_y = 217; gfx_drawstr("-12 dB"); gfx_x = 145; gfx_y = 232; gfx_drawstr("-20 dB");
+gfx_set(1.0, 1.0, 1.0, 0.5); gfx_x = 55; gfx_y = 248; gfx_drawstr("L"); gfx_x = 105; gfx_y = 248; gfx_drawstr("R");
+gfx_set(0.12, 0.14, 0.18, 1.0); gfx_rect(240, 150, gfx_w - 260, 90, 1);
+gfx_set(1.0, 1.0, 1.0, 0.05); gfx_rect(240, 150, gfx_w - 260, 90, 0);
+gfx_set(0.18, 0.55, 0.85, 1.0); gfx_x = 260; gfx_y = 165; gfx_drawstr("VM-COMP ENGINE");
+gfx_set(0.65, 0.70, 0.75, 0.8); gfx_x = 260; gfx_y = 190; gfx_drawstr("CORE STATE: VARIABLE-MU ACTIVE");
+gfx_x = 260; gfx_y = 212; slider3 == 0 ? gfx_drawstr("MODE: SMOOTH GLUE (LOW RATIO)") : gfx_drawstr("MODE: AGGRESSIVE LIMIT (HI RATIO)");

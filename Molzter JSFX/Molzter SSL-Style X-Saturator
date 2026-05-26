@@ -1,0 +1,35 @@
+desc: Molzter SSL-Style X-Saturator
+
+slider1:0<0,1,0.01>Drive (Gain)
+slider2:0<0,1,0.01>Harmonics (0=Tube, 1=Transistor)
+slider3:0<0,1,0.01>Depth (Intensity)
+slider4:0<-0.5,0.5,0.01>Shape (Edge)
+slider5:100<0,100,1>Dry/Wet Mix (%)
+slider6:0<-12,12,0.1>Output (dB)
+
+@init
+function soft_clip(x) ( x / (1 + abs(x)) );
+
+@sample
+// 1. Dry Signal Reference
+dry = spl0;
+
+// 2. Drive Stage
+in = spl0 * (1 + (slider1 * 10));
+
+// 3. Harmonic Engine
+valve = (in * in) * sign(in);
+transistor = (in * in * in);
+harmonic_base = (1 - slider2) * valve + (slider2 * transistor);
+
+// 4. Shape & Depth
+shape_processed = (in + (slider4 * in * 0.5));
+wet = soft_clip(shape_processed + (harmonic_base * slider3 * 0.5));
+
+// 5. Dry/Wet Mix
+mix = slider5 / 100;
+out = (dry * (1 - mix)) + (wet * mix);
+
+// 6. Final Output
+out_g = 10^(slider6 / 20);
+spl0 = spl1 = out * out_g;

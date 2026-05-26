@@ -1,0 +1,293 @@
+desc: Molzter Beheader Analog Saturation Model
+author: Molzter 
+version: 1.0
+
+slider1:0<0,10,0.05> Drive Input Level
+slider2:0<0,1,1{Normal, PUNISH (+20dB Extreme Overdrive)}> Saturation Headroom
+slider3:0<0,4,1{A - Ampex Tape Tube, E - EMI TG Console, N - Neve Germanium, T - Culture Triode, P - Culture Pentode}> Character Style
+slider4:20<20,1000,1> Low Cut Filter (Hz)
+slider5:0<0,1,1{Off, Thump (Low Resonance Headroom)}> Low Cut Contour
+slider6:0<-1,1,0.01> Tone Shifter (Dark to Bright)
+slider7:20000<1000,20000,10> High Cut Filter (Hz)
+slider8:0<0,1,1{Off, Steep (24dB/Oct)}> High Cut Slope
+slider9:0<-24,12,0.1> Output Level (dB)
+slider10:1<0,1,1{Manual, Auto Gain Matching}> Level Safety Link
+slider11:100<0,100,1> Dry/Wet Mix (%)
+
+@init
+// Filter state registers
+lc_l1 = lc_l2 = lc_r1 = lc_r2 = 0.0;
+hc_l1 = hc_l2 = hc_r1 = hc_r2 = 0.0;
+hc_l3 = hc_l4 = hc_r3 = hc_r4 = 0.0;
+tilt_l1 = tilt_l2 = tilt_r1 = tilt_r2 = 0.0;
+
+// Phase-Safe AA Integrator Smoothing History
+aa_smooth_l = aa_smooth_r = 0.0;
+
+// Hardware Interstage Emulation Filters
+pre_l1 = pre_r1 = 0.0;
+
+// Dynamic tracking states
+dc_bias_l = dc_bias_r = 0.0;
+pow_clean = 0.001; 
+pow_dirty = 0.001;
+auto_makeup_gain = 1.0;
+attitude_smooth = 0.0;
+
+// Mouse telemetry tracking coordinates
+mouse_drag_active = 0;
+last_mouse_y = 0;
+
+function local_tanh(x) local(e2) (
+  x = max(-20.0, min(20.0, x));
+  e2 = exp(2.0 * x);
+  (e2 - 1.0) / (e2 + 1.0);
+);
+
+@slider
+drive_db = slider1 * 6.0; 
+drive_gain = 10 ^ ((drive_db + (slider2 == 1 ? 20.0 : 0.0)) / 20.0);
+out_gain = 10 ^ (slider9 / 20.0);
+
+// Hardware low frequency saturation pre-emphasis coefficients
+pre_em_b0 = 1.15; pre_em_b1 = -0.15;
+
+// Low Cut filter coefficients
+w0_lc = 2.0 * $pi * slider4 / srate;
+q_lc = (slider5 == 1) ? 1.55 : 0.707; 
+alpha_lc = sin(w0_lc) / (2.0 * q_lc);
+a0_lc = 1.0 + alpha_lc;
+b0_lc = ((1.0 + cos(w0_lc)) / 2.0) / a0_lc;
+b1_lc = (-(1.0 + cos(w0_lc))) / a0_lc;
+b2_lc = b0_lc;
+a1_lc = (-2.0 * cos(w0_lc)) / a0_lc;
+a2_lc = (1.0 - alpha_lc) / a0_lc;
+
+// High Cut Filter Coefficients
+w0_hc = 2.0 * $pi * slider7 / srate;
+q_hc = 0.707;
+alpha_hc = sin(w0_hc) / (2.0 * q_hc);
+a0_hc = 1.0 + alpha_hc;
+b0_hc = ((1.0 - cos(w0_hc)) / 2.0) / a0_hc;
+b1_hc = (1.0 - cos(w0_hc)) / a0_hc;
+b2_hc = b0_hc;
+a1_hc = (-2.0 * cos(w0_hc)) / a0_hc;
+a2_hc = (1.0 - alpha_hc) / a0_hc;
+
+b0_hc /= a0_hc; b1_hc /= a0_hc; b2_hc /= a0_hc;
+a1_hc /= a0_hc; a2_hc /= a0_hc;
+
+// Tone filter parameters (Calibrated 1kHz hardware shelf)
+tilt_w0 = 2.0 * $pi * 1000.0 / srate; 
+tilt_g = slider6 * 5.5; 
+tilt_alpha = sin(tilt_w0) * 0.5;
+tilt_b0 = (1.0 + tilt_alpha * (10 ^ (tilt_g / 40.0)));
+tilt_b1 = -2.0 * cos(tilt_w0);
+tilt_b2 = (1.0 - tilt_alpha * (10 ^ (tilt_g / 40.0)));
+tilt_a0 = (1.0 + tilt_alpha / (10 ^ (tilt_g / 40.0)));
+tilt_a1 = -2.0 * cos(tilt_w0) / tilt_a0;
+tilt_a2 = (1.0 - tilt_alpha / (10 ^ (tilt_g / 40.0))) / tilt_a0;
+tilt_b0 /= tilt_a0; tilt_b1 /= tilt_a0; tilt_b2 /= tilt_a0;
+
+wet_mix = slider11 / 100.0;
+dry_mix = 1.0 - wet_mix;
+
+@sample
+s0 = spl0; s1 = spl1;
+
+// STAGE 1: Input Low Cut Block
+x0_l = s0; y0_l = b0_lc*x0_l + b1_lc*lc_l1 + b2_lc*lc_l2 - a1_lc*lc_l1 - a2_lc*lc_l2;
+lc_l2 = lc_l1; lc_l1 = x0_l; s0 = y0_l;
+x0_r = s1; y0_r = b0_lc*x0_r + b1_lc*lc_r1 + b2_lc*lc_r2 - a1_lc*lc_r1 - a2_lc*lc_r2;
+lc_r2 = lc_r1; lc_r1 = x0_r; s1 = y0_r;
+
+// Tracking clean RMS energy for auto-gain matrix
+input_power = (s0 * s0 + s1 * s1) * 0.5;
+pow_clean = (pow_clean * 0.9996) + (input_power * 0.0004);
+dry_tracked_l = spl0; dry_tracked_r = spl1;
+
+// STAGE 2: Component Transformer Emphasis Filter
+emp_l = s0 * pre_em_b0 + pre_l1 * pre_em_b1; pre_l1 = s0;
+emp_r = s1 * pre_em_b0 + pre_r1 * pre_em_b1; pre_r1 = s1;
+
+drv_l = emp_l * drive_gain; 
+drv_r = emp_r * drive_gain;
+
+// STAGE 3: Component Hysteresis & Dynamic Bias
+dc_bias_l = (dc_bias_l * 0.999) + (local_tanh(drv_l) * 0.015);
+dc_bias_r = (dc_bias_r * 0.999) + (local_tanh(drv_r) * 0.015);
+
+biased_l = drv_l - (dc_bias_l * 0.35);
+biased_r = drv_r - (dc_bias_r * 0.35);
+
+// STAGE 4: Topology Modeling Matrix
+slider3 == 0 ? (
+  sat_l = local_tanh(biased_l + 0.15 * (biased_l * biased_l));
+  sat_r = local_tanh(biased_r + 0.15 * (biased_r * biased_r));
+) : slider3 == 1 ? (
+  sat_l = sign(biased_l) * (1.0 - exp(-abs(biased_l * 0.88))) + (biased_l * 0.02);
+  sat_r = sign(biased_r) * (1.0 - exp(-abs(biased_r * 0.88))) + (biased_r * 0.02);
+) : slider3 == 2 ? (
+  sat_l = biased_l > 0.0 ? (1.0 - exp(-biased_l * 1.1)) : -0.72 * (1.0 - exp(biased_l * 1.6));
+  sat_r = biased_r > 0.0 ? (1.0 - exp(-biased_r * 1.1)) : -0.72 * (1.0 - exp(biased_r * 1.6));
+) : slider3 == 3 ? (
+  sat_l = biased_l / (1.0 + abs(biased_l * 0.25));
+  sat_r = biased_r / (1.0 + abs(biased_r * 0.25));
+) : (
+  p_l = local_tanh(biased_l * 0.85); p_r = local_tanh(biased_r * 0.85);
+  spike_l = sign(biased_l) * (biased_l * biased_l * biased_l) * 0.045;
+  spike_r = sign(biased_r) * (biased_r * biased_r * biased_r) * 0.045;
+  sat_l = local_tanh(p_l + spike_l); sat_r = local_tanh(p_r + spike_r);
+);
+
+sat_l -= dc_bias_l * 0.25;
+sat_r -= dc_bias_r * 0.25;
+
+// STAGE 5: Anti-Aliasing Smoothing
+aa_smooth_l = (aa_smooth_l * 0.45) + (sat_l * 0.55); sat_l = aa_smooth_l;
+aa_smooth_r = (aa_smooth_r * 0.45) + (sat_r * 0.55); sat_r = aa_smooth_r;
+
+// STAGE 6: Tone & High Cut Block
+x2_l = sat_l; y2_l = tilt_b0*x2_l + tilt_b1*tilt_l1 + tilt_b2*tilt_l2 - tilt_a1*tilt_l1 - tilt_a2*tilt_l2;
+tilt_l2 = tilt_l1; tilt_l1 = x2_l; sat_l = y2_l;
+x2_r = sat_r; y2_r = tilt_b0*x2_r + tilt_b1*tilt_r1 + tilt_b2*tilt_r2 - tilt_a1*tilt_r1 - tilt_a2*tilt_r2;
+tilt_r2 = tilt_r1; tilt_r1 = x2_r; sat_r = y2_r;
+
+x1_l = sat_l; y1_l = b0_hc*x1_l + b1_hc*hc_l1 + b2_hc*hc_l2 - a1_hc*hc_l1 - a2_hc*hc_l2;
+hc_l2 = hc_l1; hc_l1 = x1_l; sat_l = y1_l;
+x1_r = sat_r; y1_r = b0_hc*x1_r + b1_hc*hc_r1 + b2_hc*hc_r2 - a1_hc*hc_r1 - a2_hc*hc_r2;
+hc_r2 = hc_r1; hc_r1 = x1_r; sat_r = y1_r;
+
+slider8 == 1 ? (
+  y1_l = b0_hc*sat_l + b1_hc*hc_l3 + b2_hc*hc_l4 - a1_hc*hc_l3 - a2_hc*hc_l4; hc_l4 = hc_l3; hc_l3 = sat_l; sat_l = y1_l;
+  y1_r = b0_hc*sat_r + b1_hc*hc_r3 + b2_hc*hc_r4 - a1_hc*hc_r3 - a2_hc*hc_r4; hc_r4 = hc_r3; hc_r3 = sat_r; sat_r = y1_r;
+);
+
+// STAGE 7: Advanced Perceived Power Makeup Engine
+output_power = (sat_l * sat_l + sat_r * sat_r) * 0.5;
+pow_dirty = (pow_dirty * 0.9996) + (output_power * 0.0004);
+
+slider10 == 1 ? (
+  target_makeup = sqrt(pow_clean / max(0.000001, pow_dirty));
+  auto_makeup_gain = (auto_makeup_gain * 0.998) + (target_makeup * 0.002);
+) : (
+  auto_makeup_gain = 1.0;
+);
+
+final_gain = auto_makeup_gain * out_gain;
+processed_l = sat_l * final_gain;
+processed_r = sat_r * final_gain;
+
+// Blend wet / dry paths
+spl0 = (processed_l * wet_mix) + (dry_tracked_l * dry_mix);
+spl1 = (processed_r * wet_mix) + (dry_tracked_r * dry_mix);
+
+// STAGE 8: Hardware Meter Ballistics Tracking
+raw_attitude = sqrt((sat_l * sat_l + sat_r * sat_r) * 0.5) * (1.0 + slider1 * 0.55);
+attitude_smooth = (attitude_smooth * 0.94) + (min(2.5, raw_attitude) * 0.06);
+
+// ====================================================
+// RESTORED ORIGINAL USER GRAPHICAL INTERFACE (FIXED)
+// ====================================================
+@gfx 640 280
+
+// Original interaction parsing logic loop with native REAPER functions
+mouse_cap && !last_cap ? (
+  mouse_x > 33 && mouse_x < 97 && mouse_y > 68 && mouse_y < 132 ? (
+    slider1idx = 1;
+  );
+  mouse_x > 122 && mouse_x < 176 && mouse_y > 92 && mouse_y < 112 ? (
+    slider2 = !slider2;
+    sliderchange(2); // FIXED: Changed from slider_chg to native sliderchange
+  );
+  mouse_y > 214 && mouse_y < 242 ? (
+    mouse_x > 44 && mouse_x < 84 ? slider3 = 0;
+    mouse_x > 96 && mouse_x < 136 ? slider3 = 1;
+    mouse_x > 148 && mouse_x < 188 ? slider3 = 2;
+    mouse_x > 200 && mouse_x < 240 ? slider3 = 3;
+    mouse_x > 252 && mouse_x < 292 ? slider3 = 4;
+    sliderchange(4); // FIXED: Changed from slider_chg to native sliderchange
+  );
+);
+
+slider1idx ? (
+  mouse_cap ? (
+    slider1 = max(0, min(10, slider1 + (last_mouse_y - mouse_y) * 0.05));
+    sliderchange(1); // FIXED: Changed from slider_chg to native sliderchange
+  ) : slider1idx = 0;
+);
+
+last_mouse_y = mouse_y;
+last_cap = mouse_cap;
+
+// Original Drawing Routine Framework
+gfx_r = 0.28; gfx_g = 0.20; gfx_b = 0.15; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_r = 0.11; gfx_g = 0.12; gfx_b = 0.13; gfx_a = 1.0;
+gfx_rect(12, 12, gfx_w - 24, gfx_h - 24);
+gfx_set(0.24, 0.26, 0.28, 0.3);
+gfx_rect(16, 16, gfx_w - 32, gfx_h - 32, 0);
+
+m_w = 120; m_h = 75; m_x = (gfx_w * 0.5) - (m_w * 0.5); m_y = 32;
+gfx_set(0.04, 0.05, 0.06, 1.0); gfx_rect(m_x - 3, m_y - 3, m_w + 6, m_h + 6, 1);
+gfx_set(0.94, 0.92, 0.86, 1.0); gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.1, 0.1, 0.12, 0.4);
+gfx_x = m_x + 8; gfx_y = m_y + 45; gfx_drawstr("0");
+gfx_x = m_x + 36; gfx_y = m_y + 24; gfx_drawstr("DRIVE");
+gfx_x = m_x + 88; gfx_y = m_y + 45; gfx_drawstr("MAX");
+gfx_set(0.70, 0.15, 0.15, 0.7);
+gfx_x = m_x + 40; gfx_y = m_y + 58; gfx_drawstr("ATTITUDE");
+
+needle_origin_x = m_x + (m_w * 0.5); needle_origin_y = m_y + m_h + 8;
+needle_arc = -1.15 + (attitude_smooth / 2.5) * 2.30; needle_length = 62;
+tgt_needle_x = needle_origin_x + sin(needle_arc) * needle_length;
+tgt_needle_y = needle_origin_y - cos(needle_arc) * needle_length;
+gfx_set(0.05, 0.05, 0.07, 1.0); gfx_line(needle_origin_x, needle_origin_y, tgt_needle_x, tgt_needle_y, 1);
+gfx_circle(needle_origin_x, needle_origin_y - 4, 6, 1);
+
+gfx_set(0.92, 0.95, 0.96, 0.95); gfx_x = 34; gfx_y = 36; gfx_drawstr("DRIVE ENGINE");
+gfx_set(0.06, 0.07, 0.08, 0.95); gfx_circle(65, 100, 32, 1);
+gfx_set(0.35, 0.38, 0.42, 0.4); gfx_circle(65, 100, 32, 0);
+p_angle = -2.3 + (slider1 / 10.0) * 4.6;
+gfx_set(0.95, 0.45, 0.12, 1.0); gfx_line(65, 100, 65 + sin(p_angle)*28, 100 - cos(p_angle)*28, 2);
+gfx_set(0.65, 0.68, 0.70, 0.9); gfx_x = 34; gfx_y = 146; gfx_drawstr(sprintf(#, "INPUT: %.2f", slider1));
+
+slider2 == 1 ? (
+  gfx_set(0.85, 0.12, 0.10, 1.0); gfx_rect(122, 92, 54, 20, 1);
+  gfx_set(1.0, 1.0, 1.0, 1.0); gfx_x = 127; gfx_y = 98; gfx_drawstr("PUNISH");
+) : (
+  gfx_set(0.18, 0.20, 0.22, 0.5); gfx_rect(122, 92, 54, 20, 0);
+  gfx_set(0.42, 0.46, 0.48, 0.6); gfx_x = 127; gfx_y = 98; gfx_drawstr("PUNISH");
+);
+
+gfx_set(0.92, 0.95, 0.96, 0.95); gfx_x = 420; gfx_y = 36; gfx_drawstr("TONE SHAPING SHUNT");
+gfx_set(0.55, 0.58, 0.62, 0.85); gfx_x = 420; gfx_y = 58; gfx_drawstr(sprintf(#, "LOW CUT: %d Hz", slider4));
+slider5 == 1 ? gfx_drawstr(" + THUMP");
+
+gfx_x = 420; gfx_y = 78; gfx_drawstr(sprintf(#, "TILT CONTOUR: %+.2f", slider6));
+gfx_x = 420; gfx_y = 98; gfx_drawstr(sprintf(#, "HIGH CUT: %d Hz", slider7));
+slider8 == 1 ? gfx_drawstr(" + STEEP");
+
+gfx_x = 420; gfx_y = 124; gfx_drawstr(sprintf(#, "MIX BLEND: %d%% WET", slider11));
+gfx_x = 420; gfx_y = 142; gfx_drawstr(sprintf(#, "OUTPUT LEVEL: %+.1f dB", slider9));
+slider10 == 1 ? gfx_drawstr(" [AUTO]");
+
+gfx_set(0.06, 0.07, 0.08, 0.5); gfx_rect(24, 204, gfx_w - 48, 48, 1);
+gfx_set(0.25, 0.28, 0.32, 0.35); gfx_rect(24, 204, gfx_w - 48, 48, 0);
+
+btn_idx = 0;
+while(btn_idx < 5) (
+  btn_x = 44 + (btn_idx * 52); btn_y = 214;
+  slider3 == btn_idx ? (
+    gfx_set(0.95, 0.45, 0.12, 0.95); gfx_rect(btn_x, btn_y, 40, 28, 1);
+    gfx_set(1.0, 1.0, 1.0, 1.0);
+  ) : (
+    gfx_set(0.16, 0.18, 0.20, 0.85); gfx_rect(btn_x, btn_y, 40, 28, 1);
+    gfx_set(0.30, 0.32, 0.35, 0.4); gfx_rect(btn_x, btn_y, 40, 28, 0);
+    gfx_set(0.55, 0.58, 0.62, 0.75);
+  );
+  gfx_x = btn_x + 16; gfx_y = btn_y + 10;
+  btn_idx == 0 ? gfx_drawstr("A") : btn_idx == 1 ? gfx_drawstr("E") : btn_idx == 2 ? gfx_drawstr("N") : btn_idx == 3 ? gfx_drawstr("T") : gfx_drawstr("P");
+  btn_idx += 1;
+);
+gfx_set(0.32, 0.35, 0.38, 0.65); gfx_x = 320; gfx_y = 224; gfx_drawstr("ANALOG STYLE MULTI-TOPOLOGY COMPONENT MODEL ENGINE");

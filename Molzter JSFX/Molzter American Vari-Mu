@@ -1,0 +1,143 @@
+desc: Molzter American Vari-Mu 
+author: Molzter
+version: 1.0
+
+slider1:0<0,18,0.1> Input Drive / Tube Preamp (dB)
+slider2:-12<-40,0,0.5> Threshold (dB)
+slider3:2<0,5,1{Ultra Slow, Slow, Med-Slow, Medium, Fast, Ultra Fast}> Attack Time
+slider4:3<0,5,1{Slow, Med-Slow, Medium, Med-Fast, Fast, Ultra Fast}> Release Time
+slider5:0<0,4,1{Off, 50 Hz, 100 Hz, 150 Hz, 250 Hz}> Sidechain Filter
+slider6:0<0,24,0.1> Makeup Gain (dB)
+slider7:100<0,100,1> Mix (Dry / Wet %)
+
+@init
+// Sidechain filter memory slots
+sc_hp1 = sc_hp2 = 0;
+
+// Vari-Mu programmatic timing tracking variables
+env_detect = 0.0;
+gain_reduction = 0.0;
+meter_smooth = 0.0;
+
+@slider
+// Input/Output signal scalers
+in_scale = 10 ^ (slider1 / 20);
+out_scale = 10 ^ (slider6 / 20);
+wet_mix = slider7 / 100;
+dry_mix = 1.0 - wet_mix;
+
+// Map out the dynamic thresholds strictly matching the fixed slider bounds
+thresh_db = slider2;
+
+// Replicate the hardware constants (Vari-Mu style soft curves)
+slider3 == 0 ? atk_ms = 45.0 : slider3 == 1 ? atk_ms = 25.0 : slider3 == 2 ? atk_ms = 15.0 :
+slider3 == 3 ? atk_ms = 8.0  : slider3 == 4 ? atk_ms = 3.0  : atk_ms = 0.5;
+
+slider4 == 0 ? rel_ms = 1200.0 : slider4 == 1 ? rel_ms = 600.0 : slider4 == 2 ? rel_ms = 350.0 :
+slider4 == 3 ? rel_ms = 180.0  : slider4 == 4 ? rel_ms = 90.0  : rel_ms = 45.0;
+
+atk_coef = exp(-1.0 / (srate * (atk_ms / 1000.0)));
+rel_coef = exp(-1.0 / (srate * (rel_ms / 1000.0)));
+
+@sample
+// Capture clean dry splits
+dry_l = spl0;
+dry_r = spl1;
+
+// STAGE 1: Input Transformer & 6V6 Tube Stage Saturation
+sig_l = dry_l * in_scale;
+sig_r = dry_r * in_scale;
+
+// Custom asymmetrical soft-clipper modeling 6V6 push-pull tube grid behavior
+sig_l = sig_l > 0 ? (1.0 - exp(-sig_l)) : (sig_l * 0.98 + 0.02 * (sig_l ^ 2));
+sig_r = sig_r > 0 ? (1.0 - exp(-sig_r)) : (sig_r * 0.98 + 0.02 * (sig_r ^ 2));
+
+// STAGE 2: Sidechain Control Extraction Loop
+sc_l = sig_l;
+sc_r = sig_r;
+
+// Active Sidechain High-Pass Filter Implementation
+slider5 > 0 ? (
+  slider5 == 1 ? fc = 50 : slider5 == 2 ? fc = 100 : slider5 == 3 ? fc = 150 : fc = 250;
+  rc = 1.0 / (2 * $pi * fc);
+  alpha = rc / (rc + (1.0 / srate));
+  
+  sc_l = alpha * (sc_l - sc_hp1); sc_hp1 = sig_l;
+  sc_r = alpha * (sc_r - sc_hp2); sc_hp2 = sig_r;
+);
+
+// Peak absolute sidechain linkage for balanced mix centering
+det_val = max(abs(sc_l), abs(sc_r));
+det_db = 20 * log10(max(0.000001, det_val));
+
+// STAGE 3: Progressive Infinite Ratio Vari-Mu Compression
+target_gr = 0.0;
+det_db > thresh_db ? (
+  // Vari-Mu ratio dynamically scales steeper the further the signal crosses threshold
+  over_db = det_db - thresh_db;
+  dynamic_ratio = 2.0 + (over_db * 0.4); 
+  target_gr = over_db * (1.0 - (1.0 / dynamic_ratio));
+);
+
+// Ballistics envelope tracking
+target_gr > env_detect ? (
+  env_detect = (env_detect * atk_coef) + (target_gr * (1.0 - atk_coef));
+) : (
+  env_detect = (env_detect * rel_coef) + (target_gr * (1.0 - rel_coef));
+);
+
+// Convert calculated envelope attenuation back to a clean scalar
+mu_gain = 10 ^ (-env_detect / 20);
+wet_l = sig_l * mu_gain * out_scale;
+wet_r = sig_r * mu_gain * out_scale;
+
+// STAGE 4: Mix Blending (Parallel Processing Output)
+spl0 = (wet_l * wet_mix) + (dry_l * dry_mix);
+spl1 = (wet_r * wet_mix) + (dry_r * dry_mix);
+
+
+// ==========================================
+// VINTAGE USA BROADCAST CHASSIS INTERFACE
+// ==========================================
+@gfx 480 145
+
+// Matte Charcoal Vintage Broadcast Chassis Paint Faceplate
+gfx_r = 0.32; gfx_g = 0.33; gfx_b = 0.35; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Emulate physical spring and inertia physics of old backlit VU meters
+meter_smooth = (meter_smooth * 0.92) + (env_detect * 0.08);
+
+// Draw the iconic glowing cream/amber vintage VU Meter case window
+m_x = (gfx_w / 2) - 85; m_y = 15; m_w = 170; m_h = 75;
+gfx_set(0.95, 0.90, 0.78, 1.0); // Backlit aged paper glow
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.1, 0.1, 0.1, 1.0); // Dark border frame rim
+gfx_rect(m_x, m_y, m_w, m_h, 0);
+
+// Render standard decibel scale arc tick points
+gfx_set(0.2, 0.2, 0.2, 0.5);
+i = 0;
+while (i <= 5) (
+  tick_ang = ($pi * 1.3) - ((i / 5) * $pi * 0.6);
+  gfx_line(m_x + (m_w/2) + cos(tick_ang) * 65, m_y + m_h + sin(tick_ang) * 65, m_x + (m_w/2) + cos(tick_ang) * 75, m_y + m_h + sin(tick_ang) * 75);
+  i += 1;
+);
+
+// Needle Calculation (Deflecting left-to-right to denote gain attenuation)
+needle_deflect = ($pi * 1.3) - (min(1.0, meter_smooth / 24.0) * $pi * 0.6);
+gfx_set(0.85, 0.1, 0.1, 1.0); // Deep red structural needle pin
+gfx_line(m_x + (m_w/2), m_y + m_h - 2, m_x + (m_w/2) + cos(needle_deflect) * 72, m_y + m_h + sin(needle_deflect) * 72, 2);
+
+// Center Meter Text Label
+gfx_set(0.1, 0.1, 0.1, 0.7);
+gfx_x = m_x + 40; gfx_y = m_y + 48;
+gfx_drawstr("DB GAIN REDUCTION");
+
+// Script metadata paneling footer lines
+gfx_set(0.85, 0.85, 0.9, 0.9);
+gfx_x = 24; gfx_y = 110;
+gfx_drawstr("MOLZTER ENGINE");
+
+gfx_x = gfx_w - 150; gfx_y = 110;
+gfx_drawstr("MODEL VARI-MU LIMITER");

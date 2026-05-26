@@ -1,0 +1,236 @@
+desc: Molzter MPC Compressor 
+author: Molzter
+version: 1.0
+
+slider1:-20<-60,0,0.1> Threshold (dB)
+slider2:2<1,20,0.1> Compression Ratio (:1)
+slider3:10<0.1,100,0.1> Attack Time (ms)
+slider4:100<5,1000,1> Release Time (ms)
+slider5:0<-12,24,0.1> Makeup Gain Stage (dB)
+slider6:12<0.1,30,0.1> Depth Control (Max GR dB)
+slider7:6<0,30,0.1> Soft Knee Width (dB)
+slider8:0<0,1,1{Standard Mode, Program Auto}> Program (Pgm) Network
+
+@init
+log2db = 8.6858896380650365530225783783321; 
+db2log = 0.11512925464970228420089957273422; 
+
+// Historical scrolling graph circular buffer tracking registries
+gr_buf = 0; 
+buf_size = 300;
+buf_pos = 0;
+memset(gr_buf, 0, buf_size);
+
+// Envelope detector network tracking states
+env_fast = 0.0;
+env_med = 0.0;
+env_slow = 0.0;
+gr_smooth = 0.0;
+graph_timer = 0;
+
+@slider
+thresh_db = slider1;
+ratio_val = slider2;
+makeup_factor = 10 ^ (slider5 / 20);
+max_gr_floor = slider6;
+knee_width = slider7;
+pgm_mode = slider8;
+
+// Map dynamic ballistics attack and release timing coefficients
+t_att_fast = 1.0 - exp(-1.0 / (srate * (slider3 / 1000.0)));
+t_rel_fast = 1.0 - exp(-1.0 / (srate * (slider4 / 1000.0)));
+
+// Map multi-stage parallel constants for the MPC Program auto-release network
+t_att_med  = 1.0 - exp(-1.0 / (srate * ((slider3 * 2.5) / 1000.0)));
+t_rel_med  = 1.0 - exp(-1.0 / (srate * ((slider4 * 3.5) / 1000.0)));
+t_att_slow = 1.0 - exp(-1.0 / (srate * ((slider3 * 6.0) / 1000.0)));
+t_rel_slow = 1.0 - exp(-1.0 / (srate * ((slider4 * 10.0) / 1000.0)));
+
+@block
+// Syntactically pure EEL2 conditional block checker (No "if" syntax used)
+graph_timer += samplesblock;
+graph_timer >= (srate / 30) ? (
+  graph_timer = 0;
+  gr_buf[buf_pos] = gr_smooth;
+  buf_pos += 1;
+  buf_pos >= buf_size ? buf_pos = 0;
+);
+
+@sample
+// STAGE 1: Dual Channel Sidechain Link Peak Capture
+side_in = max(abs(spl0), abs(spl1));
+side_db = side_in > 0.00001 ? 20 * log10(side_in) : -120.0;
+
+// STAGE 2: Harrison Multi-Stage Detector Network Envelope Integration
+pgm_mode == 1 ? (
+  // Envelope Stage 1: Fast Transients
+  env_fast = side_db > env_fast ? env_fast + (side_db - env_fast) * t_att_fast : env_fast + (side_db - env_fast) * t_rel_fast;
+  // Envelope Stage 2: Program Material Body
+  env_med  = side_db > env_med  ? env_med  + (side_db - env_med)  * t_att_med  : env_med  + (side_db - env_med)  * t_rel_med;
+  // Envelope Stage 3: Long Term Audio Memory Root
+  env_slow = side_db > env_slow ? env_slow + (side_db - env_slow) * t_att_slow : env_slow + (side_db - env_slow) * t_rel_slow;
+  
+  detect_level = (env_fast * 0.5) + (env_med * 0.35) + (env_slow * 0.15);
+) : (
+  env_fast = side_db > env_fast ? env_fast + (side_db - env_fast) * t_att_fast : env_fast + (side_db - env_fast) * t_rel_fast;
+  detect_level = env_fast;
+);
+
+// STAGE 3: Compression Soft Knee and Dynamic Ratio Processing
+target_gr = 0.0;
+knee_width > 0 ? (
+  half_knee = knee_width * 0.5;
+  detect_level > (thresh_db - half_knee) ? (
+    detect_level < (thresh_db + half_knee) ? (
+      // Smooth interpolation transition window inside soft-knee sector
+      target_gr = ((1.0 / ratio_val - 1.0) * (detect_level - thresh_db + half_knee)^2) / (2.0 * knee_width);
+    ) : (
+      // Exceeded soft knee limit -> standard ratio compression line
+      target_gr = (detect_level - thresh_db) * (1.0 / ratio_val - 1.0);
+    );
+  );
+) : (
+  // Hard Knee Mode fallback logic
+  detect_level > thresh_db ? target_gr = (detect_level - thresh_db) * (1.0 / ratio_val - 1.0);
+);
+
+// STAGE 4: Strict MPC Depth Limit Clamping (Enforces strict ceiling maximum gain reduction floor)
+calc_gr = abs(target_gr);
+calc_gr > max_gr_floor ? calc_gr = max_gr_floor;
+
+// Smooth ballistics envelope tracking transitions smoothly
+gr_smooth = gr_smooth + (calc_gr - gr_smooth) * t_rel_fast;
+gain_attenuation = 10 ^ (-gr_smooth / 20);
+
+// STAGE 5: Channel Output Processing and Signal Peak Tracking
+spl0_out = spl0 * gain_attenuation * makeup_factor;
+spl1_out = spl1 * gain_attenuation * makeup_factor;
+
+// Track peak profiles to feed input and output hardware meter segments smoothly
+meter_in = max(meter_in, side_in);
+meter_out = max(meter_out, max(abs(spl0_out), abs(spl1_out)));
+
+spl0 = spl0_out;
+spl1 = spl1_out;
+
+// ====================================================
+// HARRISON CONSOLES Slate Gray & Gold Graphic Interface
+// ====================================================
+@gfx 630 310
+
+// System clear color (Harrison Signature Charcoal Slate Matte Finish)
+gfx_clear = 0x1E2123; 
+
+// Left Panel Housing: Parameter Text Interface Area
+gfx_set(0.12, 0.13, 0.15, 1.0);
+gfx_rect(15, 15, 230, 280, 1);
+gfx_set(0.22, 0.24, 0.26, 0.4);
+gfx_rect(15, 15, 230, 280, 0);
+
+// Brand identity stamps header layout
+gfx_setfont(1, "Arial", 16, 'b');
+gfx_set(0.88, 0.48, 0.12, 1.0); // Harrison signature golden accent tint
+gfx_x = 28; gfx_y = 28; gfx_drawstr("MOLZTER MPC");
+gfx_setfont(1, "Arial", 12, 'r');
+gfx_set(0.65, 0.68, 0.70, 0.85);
+gfx_x = 152; gfx_y = 31; gfx_drawstr("DIGITAL STRIP");
+
+// Dynamic Parameter Field Status Block Layout
+gfx_setfont(1, "Arial", 11, 'b');
+gfx_set(0.90, 0.92, 0.95, 0.9);
+gfx_x = 32; gfx_y = 65;  gfx_drawstr(sprintf(#, "THRESHOLD LEVEL:  %.1f dB", slider1));
+gfx_x = 32; gfx_y = 92;  gfx_drawstr(sprintf(#, "COMPRESSION RATIO: %.1f : 1", slider2));
+gfx_x = 32; gfx_y = 119; gfx_drawstr(sprintf(#, "ATTACK BALLISTICS: %.1f ms", slider3));
+gfx_x = 32; gfx_y = 146; gfx_drawstr(sprintf(#, "RELEASE DURATION:  %.0f ms", slider4));
+gfx_x = 32; gfx_y = 173; gfx_drawstr(sprintf(#, "MAKEUP GAIN STAGE: %.1f dB", slider5));
+gfx_x = 32; gfx_y = 200; gfx_drawstr(sprintf(#, "DEPTH CEILING (GR): %.1f dB", slider6));
+gfx_x = 32; gfx_y = 227; gfx_drawstr(sprintf(#, "SOFT KNEE VALUE:   %.1f dB", slider7));
+
+gfx_x = 32; gfx_y = 260; 
+slider8 == 1 ? (
+  gfx_set(0.88, 0.48, 0.12, 1.0);
+  gfx_drawstr("DETECTOR NETWORK: PROGRAM (AUTO)");
+) : (
+  gfx_set(0.65, 0.68, 0.70, 0.85);
+  gfx_drawstr("DETECTOR NETWORK: STANDARD MODE");
+);
+
+// Right Top Panel Housing: Reduction Plot Visual Window
+g_x = 260; g_y = 15; g_w = 355; g_h = 155;
+gfx_set(0.12, 0.13, 0.15, 1.0);
+gfx_rect(g_x, g_y, g_w, g_h, 1);
+gfx_set(0.06, 0.07, 0.08, 1.0); // Inner grid screen window frame tint
+gfx_rect(g_x + 5, g_y + 22, g_w - 10, g_h - 27, 1);
+
+gfx_setfont(1, "Arial", 10, 'b');
+gfx_set(0.60, 0.65, 0.68, 0.8);
+gfx_x = g_x + 8; gfx_y = g_y + 6; gfx_drawstr("REAL-TIME REDUCTION HISTORY (dB)");
+
+// Internal visual reticle markers 
+gfx_set(0.14, 0.16, 0.18, 0.45);
+gfx_line(g_x + 5, g_y + 22 + 42, g_x + g_w - 5, g_y + 22 + 42);
+gfx_line(g_x + 5, g_y + 22 + 84, g_x + g_w - 5, g_y + 22 + 84);
+gfx_set(0.55, 0.58, 0.60, 0.6);
+gfx_x = g_x + 10; gfx_y = g_y + 22 + 34; gfx_drawstr("-10");
+gfx_x = g_x + 10; gfx_y = g_y + 22 + 76; gfx_drawstr("-20");
+
+// Draw streaming red reduction history data points
+gfx_set(0.88, 0.22, 0.22, 1.0);
+i = 0;
+loop(buf_size,
+  idx = buf_pos + i;
+  idx >= buf_size ? idx -= buf_size;
+  val_gr = gr_buf[idx];
+  
+  plot_x = (g_x + 5) + (i * ((g_w - 10) / buf_size));
+  plot_y = (g_y + 22) + (val_gr * ((g_h - 27) / 30.0)); // Calibrated max 30dB ceiling vertical range
+  plot_y > (g_y + g_h - 6) ? plot_y = (g_y + g_h - 6);
+  
+  i == 0 ? (gfx_x = plot_x; gfx_y = plot_y;);
+  gfx_lineto(plot_x, plot_y, 1);
+  i += 1;
+);
+
+// Right Bottom Panel Housing: Vertical LED Console Meter Modules
+m_x = 260; m_y = 185; m_w = 355; m_h = 110;
+gfx_set(0.12, 0.13, 0.15, 1.0);
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.22, 0.24, 0.26, 0.4);
+gfx_rect(m_x, m_y, m_w, m_h, 0);
+
+// Vertical VU Meter Processing Layout Blocks
+function draw_hardware_meter(x_pos, y_pos, width, height, level_db, is_reduction) local(pct) (
+  gfx_set(0.06, 0.07, 0.08, 1.0);
+  gfx_rect(x_pos, y_pos, width, height, 1);
+  
+  pct = is_reduction ? (level_db / 30.0) : ((level_db + 48.0) / 48.0);
+  pct < 0.0 ? pct = 0.0; pct > 1.0 ? pct = 1.0;
+  
+  is_reduction ? (
+    gfx_set(0.88, 0.22, 0.22, 1.0); // High impact attenuation crimson
+    gfx_rect(x_pos, y_pos, width, height * pct, 1);
+  ) : (
+    gfx_set(0.25, 0.72, 0.35, 1.0); // Discrete operational console green
+    gfx_rect(x_pos, y_pos + height - (height * pct), width, height * pct, 1);
+  );
+);
+
+// Calculate exact log values to feed visual tracking passes
+db_in  = meter_in > 0.00001  ? 20 * log10(meter_in)  : -48.0;
+db_out = meter_out > 0.00001 ? 20 * log10(meter_out) : -48.0;
+
+// Execute hardware visual meters
+draw_hardware_meter(m_x + 45,  m_y + 35, 22, 60, db_in, 0);
+draw_hardware_meter(m_x + 165, m_y + 35, 22, 60, gr_smooth, 1);
+draw_hardware_meter(m_x + 285, m_y + 35, 22, 60, db_out, 0);
+
+// Hardware status label strips
+gfx_setfont(1, "Arial", 10, 'b');
+gfx_set(0.70, 0.73, 0.75, 0.9);
+gfx_x = m_x + 40;  gfx_y = m_y + 15; gfx_drawstr("INPUT");
+gfx_x = m_x + 152; gfx_y = m_y + 15; gfx_drawstr("REDUCTION");
+gfx_x = m_x + 276; gfx_y = m_y + 15; gfx_drawstr("OUTPUT");
+
+// Clean peak registers smoothly to refresh per screen update loop
+meter_in = 0.0;
+meter_out = 0.0;

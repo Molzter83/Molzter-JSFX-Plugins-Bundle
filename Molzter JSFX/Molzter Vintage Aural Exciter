@@ -1,0 +1,185 @@
+desc: Molzter Vintage Aural Exciter  
+author: Molzter
+version: 1.1
+
+slider1:1<0,2,1{Bypass, Mix 1, Mix 2}>Mode
+slider2:0<-18,18,0.1>Input Gain (dB)
+slider3:5<1,10,0.1>Ax Mix (Exciter Amount)
+slider4:0<-18,18,0.1>Output Gain (dB)
+
+@init
+// Filter memory states for 2-pole sidechain high pass
+hipass_x1 = 0; hipass_x2 = 0;
+hipass_y1 = 0; hipass_y2 = 0;
+
+// Exciter internal compressor envelope
+sidechain_env = 0.0;
+
+// Meter tracking variables across audio and graphics threads
+meter_target_db = -20.0;
+meter_needle = 0.0;
+meter_velocity = 0.0;
+
+function math_sign(val) ( val < 0 ? -1 : 1; );
+
+@slider
+op_mode = slider1;
+in_amp = 10 ^ (slider2 / 20);
+ax_mix = slider3 / 10; 
+out_amp = 10 ^ (slider4 / 20);
+
+// Aphex sidechain High-Pass Filter calculation (~3.5 kHz)
+hp_freq = 3500; 
+hp_q = 0.707;
+hp_w0 = 2 * $pi * hp_freq / srate;
+hp_alpha = sin(hp_w0) / (2 * hp_q);
+
+hp_b0 = (1 + cos(hp_w0)) / 2;
+hp_b1 = -(1 + cos(hp_w0));
+hp_b2 = (1 + cos(hp_w0)) / 2;
+hp_a0 = 1 + hp_alpha;
+hp_a1 = -2 * cos(hp_w0);
+hp_a2 = 1 - hp_alpha;
+
+b0 = hp_b0 / hp_a0; b1 = hp_b1 / hp_a0; b2 = hp_b2 / hp_a0;
+a1 = hp_a1 / hp_a0; a2 = hp_a2 / hp_a0;
+
+sc_atk = exp(-1 / (srate * 0.002)); 
+sc_rel = exp(-1 / (srate * 0.060)); 
+
+// Pre-calculate spring ballistic time constant for the sample rate
+// This prevents needing to access 'srate' inside the graphics block
+ballistic_dt = 1.0 / srate;
+
+@sample
+raw_l = spl0;
+raw_r = spl1;
+
+s0 = raw_l * in_amp;
+s1 = raw_r * in_amp;
+
+clean_l = s0;
+clean_r = s1;
+
+op_mode == 0 ? (
+  spl0 = clean_l * out_amp;
+  spl1 = clean_r * out_amp;
+) : (
+  mono_mix = (s0 + s1) * 0.5;
+  highs = b0 * mono_mix + b1 * hipass_x1 + b2 * hipass_x2 - a1 * hipass_y1 - a2 * hipass_y2;
+  
+  hipass_x2 = hipass_x1; hipass_x1 = mono_mix;
+  hipass_y2 = hipass_y1; hipass_y1 = highs;
+  
+  abs_highs = abs(highs);
+  sidechain_env = abs_highs > sidechain_env ? 
+    (sidechain_env * sc_atk) + (abs_highs * (1.0 - sc_atk)) : 
+    (sidechain_env * sc_rel) + (abs_highs * (1.0 - sc_rel));
+    
+  comp_thresh = 0.05;
+  comp_gain = sidechain_env > comp_thresh ? comp_thresh / sidechain_env : 1.0;
+  exciter_drive = highs * comp_gain * 2.5; 
+  
+  harmonics = exciter_drive + (exciter_drive * exciter_drive * 0.45) - (exciter_drive * exciter_drive * 0.05);
+  
+  op_mode == 1 ? (
+    wet_l = harmonics * ax_mix;
+    wet_r = harmonics * ax_mix;
+  ) : (
+    wet_l = harmonics * ax_mix * 1.1;
+    wet_r = -harmonics * ax_mix * 0.9; 
+  );
+  
+  spl0 = (clean_l + wet_l) * out_amp;
+  spl1 = (clean_r + wet_r) * out_amp;
+);
+
+// --- VU NEEDLE BALLISTICS ENGINE ---
+// Run physics calculations per sample where srate is natively accurate
+audio_peak = max(abs(spl0), abs(spl1));
+meter_target_db = 20 * log10(max(0.00001, audio_peak));
+
+// Scale dB (-20 to +3) cleanly to a 0.0 - 1.1 rotation space
+normalized_target = (meter_target_db + 20) / 23; 
+normalized_target = max(0.0, min(1.1, normalized_target));
+
+// Apply spring mass coil equations
+meter_force = (normalized_target - meter_needle) * 45.0;
+meter_velocity = (meter_velocity + meter_force * ballistic_dt) * 0.9998; // Friction loss coefficient
+meter_needle += meter_velocity * ballistic_dt;
+
+
+// ==========================================
+// VINTAGE HARDWARE GRAPHICS INTERFACE
+// ==========================================
+@gfx 380 200
+gfx_clear = 1973790; // Deep charcoal faceplate
+
+// 1. Draw Outer Plate Structural Accents
+gfx_set(0.12, 0.12, 0.12, 1.0);
+gfx_rect(0, 0, gfx_width, 100, 1); 
+
+// 2. Build Backlit Analog VU Meter Chamber
+vux = 25; vuy = 15; vuw = 160; vuh = 70;
+gfx_set(0.96, 0.91, 0.74, 1.0); // Incandescent vintage glow
+gfx_rect(vux, vuy, vuw, vuh, 1);
+
+gfx_set(0.35, 0.35, 0.35, 1.0);
+gfx_rect(vux - 1, vuy - 1, vuw + 2, vuh + 2, 0);
+
+// Draw Internal Scale Markings
+gfx_set(0.2, 0.2, 0.2, 0.6);
+gfx_setfont(1, "Arial", 10, 'B');
+gfx_x = vux + 12; gfx_y = vuy + 45; gfx_drawstr("-20");
+gfx_x = vux + 45; gfx_y = vuy + 22; gfx_drawstr("-10");
+gfx_x = vux + 80; gfx_y = vuy + 12; gfx_drawstr("-3");
+gfx_x = vux + 105; gfx_y = vuy + 16; gfx_drawstr("0");
+
+gfx_set(0.8, 0.15, 0.1, 0.7);
+gfx_x = vux + 122; gfx_y = vuy + 24; gfx_drawstr("+3");
+gfx_rect(vux + 108, vuy + 10, 32, 3, 1);
+
+// 3. Render Needle Vector Line (Driven by our fixed background engine)
+needle_angle = $pi * 0.75 - (meter_needle * $pi * 0.55);
+pivot_x = vux + (vuw / 2);
+pivot_y = vuy + vuh + 15;
+needle_len = 65;
+
+end_x = pivot_x + cos(needle_angle) * needle_len;
+end_y = pivot_y - sin(needle_angle) * needle_len;
+
+gfx_set(0.1, 0.1, 0.1, 1.0); 
+gfx_line(pivot_x, pivot_y - 20, end_x, max(vuy + 4, end_y), 1);
+
+// 4. Draw Branding Panels
+gfx_set(0.9, 0.9, 0.9, 0.95);
+gfx_setfont(1, "Arial", 18, 'I');
+gfx_x = 220; gfx_y = 25;
+gfx_drawstr("MOLZTER");
+
+gfx_set(0.7, 0.7, 0.7, 0.8);
+gfx_setfont(2, "Arial", 11, 'B');
+gfx_x = 220; gfx_y = 48;
+gfx_drawstr("VINTAGE AURAL EXCITER");
+
+// 5. Draw Parameter Readout Panels
+gfx_set(0.1, 0.1, 0.1, 0.3);
+gfx_rect(10, 115, gfx_width - 20, 72, 1); 
+gfx_set(0.4, 0.4, 0.4, 0.5);
+gfx_rect(10, 115, gfx_width - 20, 72, 0);
+
+gfx_set(0.85, 0.85, 0.85, 0.9);
+gfx_setfont(1, "Arial", 11, 'B');
+
+gfx_x = 25; gfx_y = 128; gfx_drawstr("MODE:");
+gfx_x = 25; gfx_y = 152; 
+op_mode == 0 ? gfx_drawstr("BYPASS") : op_mode == 1 ? gfx_drawstr("MIX 1 (NORM)") : gfx_drawstr("MIX 2 (WIDE)");
+
+gfx_x = 165; gfx_y = 128; gfx_drawstr("AX MIX AMOUNT");
+gfx_x = 165; gfx_y = 152;
+gfx_printed_mix = slider3;
+gfx_drawnumber(gfx_printed_mix, 1);
+
+gfx_x = 290; gfx_y = 128; gfx_drawstr("OUTPUT LEVEL");
+gfx_x = 290; gfx_y = 152;
+gfx_drawnumber(slider4, 1); gfx_drawstr(" dB");

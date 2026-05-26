@@ -1,0 +1,109 @@
+desc: Molzter CL 1B Mk II Optical Compressor
+author: Molzter
+version: 1.0
+
+slider1:0<-40,10,0.1> Threshold (dB)
+slider2:2.0<2.0,10.0,0.1> Ratio Setting (:1)
+slider3:10<0.5,300,1> Attack Time (ms)
+slider4:100<50,2000,10> Release Time (ms)
+slider5:0<0,2,1{Gain Reduction, Input VU, Output VU}> Meter Selector Mode
+slider6:0<-10,30,0.1> Output Gain Stage (dB)
+
+@init
+env_state_l = env_state_r = 0.0;
+meter_smooth = 0.0;
+out_l_old = out_r_old = 0.0;
+
+@slider
+thresh_db = slider1;
+ratio_inv = (1.0 - (1.0 / slider2));
+out_makeup = 10 ^ (slider6 / 20);
+
+// Pre-calculate reaction coefficients
+att_alpha = 1.0 - exp(-1.0 / (srate * (slider3 / 1000.0)));
+rel_alpha = 1.0 - exp(-1.0 / (srate * (slider4 / 1000.0)));
+
+@sample
+// Stage 1: Sidechain Detection
+db_in_l = 20 * log10(max(0.00001, abs(spl0)));
+db_in_r = 20 * log10(max(0.00001, abs(spl1)));
+
+target_gr_l = max(0, db_in_l - thresh_db) * ratio_inv;
+target_gr_r = max(0, db_in_r - thresh_db) * ratio_inv;
+
+// Optical Charge/Discharge tracking
+env_state_l += (target_gr_l - env_state_l) * (target_gr_l > env_state_l ? att_alpha : rel_alpha);
+env_state_r += (target_gr_r - env_state_r) * (target_gr_r > env_state_r ? att_alpha : rel_alpha);
+
+// Apply attenuation (using 10^-x/20 logic)
+spl0 *= 10 ^ (-env_state_l / 20);
+spl1 *= 10 ^ (-env_state_r / 20);
+
+// Stage 2: Tube Pre-Amp & Output
+spl0 *= out_makeup;
+spl1 *= out_makeup;
+
+// Optimized harmonic addition (x*x and x*x*x)
+spl0 += 0.015 * (spl0 * spl0) - 0.005 * (spl0 * spl0 * spl0);
+spl1 += 0.015 * (spl1 * spl1) - 0.005 * (spl1 * spl1 * spl1);
+
+// Stage 3: Metering
+slider5 == 0 ? meter_target = (env_state_l + env_state_r) * 0.5 :
+slider5 == 1 ? meter_target = max(0, 20 * log10(max(0.001, (abs(spl0) + abs(spl1)) * 0.5)) + 18) :
+               meter_target = max(0, 20 * log10(max(0.001, (abs(spl0) + abs(spl1)) * 0.5)) + 18);
+
+meter_smooth = (meter_smooth * 0.85) + (meter_target * 0.15);
+
+@gfx 620 280
+gfx_r = 0.16; gfx_g = 0.28; gfx_b = 0.44; gfx_a = 1.0; gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Fixed syntax: used commas instead of semicolons for gfx_set
+gfx_set(0.08, 0.15, 0.26, 0.6); 
+gfx_rect(12, 12, gfx_w - 24, gfx_h - 24, 0);
+
+m_w = 210; m_h = 105;
+m_x = gfx_w - m_w - 35; m_y = 35;
+needle_len = 82;
+
+gfx_set(0.10, 0.12, 0.15, 1.0);
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.98, 0.84, 0.42, 1.0);
+gfx_rect(m_x + 5, m_y + 5, m_w - 10, m_h - 10, 1);
+
+pivot_x = m_x + (m_w / 2);
+pivot_y = m_y + m_h - 10;
+
+slider5 == 0 ? angle = -0.40 - (min(20, meter_smooth) / 20) * 2.0 : angle = -2.40 + (min(24, meter_smooth) / 24) * 2.0;
+
+tip_x = pivot_x + cos(angle) * needle_len;
+tip_y = pivot_y + sin(angle) * needle_len;
+
+gfx_set(0.15, 0.15, 0.15, 0.45);
+slider5 == 0 ? (
+  gfx_x = m_x + 22; gfx_y = m_y + 50; gfx_drawstr("-20");
+  gfx_x = m_x + 55; gfx_y = m_y + 24; gfx_drawstr("-10");
+  gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("-5");
+  gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-2");
+  gfx_x = m_x + 180; gfx_y = m_y + 50; gfx_drawstr("0");
+) : (
+  gfx_x = m_x + 22; gfx_y = m_y + 50; gfx_drawstr("0");
+  gfx_x = m_x + 60; gfx_y = m_y + 24; gfx_drawstr("3");
+  gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("7");
+  gfx_x = m_x + 142; gfx_y = m_y + 24; gfx_drawstr("14");
+  gfx_x = m_x + 175; gfx_y = m_y + 50; gfx_drawstr("24");
+);
+
+gfx_set(0.05, 0.05, 0.06, 1.0);
+gfx_line(pivot_x, pivot_y, tip_x, tip_y, 1);
+gfx_set(0.35, 0.05, 0.06, 1.0);
+gfx_rect(m_x - 45, m_y + m_h - 22, 16, 16, 1);
+gfx_set(0.95, 0.22, 0.25, 0.85);
+gfx_rect(m_x - 43, m_y + m_h - 20, 12, 12, 1);
+
+gfx_set(0.07, 0.13, 0.22, 0.45);
+gfx_rect(32, 35, 290, 150, 1);
+gfx_set(0.92, 0.94, 0.96, 0.9);
+gfx_x = 48; gfx_y = 52; gfx_drawstr(sprintf(#, "THRESHOLD:   %.1f dB", slider1));
+gfx_x = 48; gfx_y = 82; gfx_drawstr(sprintf(#, "RATIO SECTOR: %.1f : 1", slider2));
+gfx_x = 48; gfx_y = 112; gfx_drawstr(sprintf(#, "ATTACK SPD:   %.1f ms", slider3));
+gfx_x = 48; gfx_y = 142; gfx_drawstr(sprintf(#, "RELEASE SPD:  %d ms", slider4));

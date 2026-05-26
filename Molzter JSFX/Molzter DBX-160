@@ -1,0 +1,176 @@
+desc: Molzter Vintage VCA Compressor (dbx 160 Architecture Mirror)
+author: Molzter
+version: 1.0
+
+slider1:0<-40,20,0.1> Threshold (dB)
+slider2:1<1,120,0.1> Compression / Ratio
+slider3:0<-20,20,0.1> Output Gain (dB)
+slider4:100<0,100,1> Mix / Parallel (%)
+slider5:2<0,2,1{Input, Output, Gain Change}> Meter Mode
+
+@init
+// RMS Window memory initialization (approx 30ms window for classic VCA tracking)
+rms_window = floor(0.030 * srate);
+rms_buffer = 0; // Pointer to start of memory allocation ring-buffer
+rms_ptr = 0;
+rms_sum_l = 0;
+rms_sum_r = 0;
+
+// Clear the allocated memory block cleanly
+memset(rms_buffer, 0, rms_window * 2);
+
+// Time constant tracking state memory 
+env_gr = 0.0;
+meter_smooth = 0.0;
+
+@slider
+thresh_db = slider1;
+ratio = slider2;
+out_gain = 10 ^ (slider3 / 20);
+mix_wet = slider4 / 100;
+mix_dry = 1.0 - mix_wet;
+meter_mode = slider5;
+
+@sample
+raw_l = spl0;
+raw_r = spl1;
+
+// STEP 1: True Stereo RMS Power Computation
+// Subtract oldest sample from the running squares sum
+rms_sum_l -= rms_buffer[rms_ptr * 2];
+rms_sum_r -= rms_buffer[rms_ptr * 2 + 1];
+
+// Square the new current incoming samples
+sq_l = raw_l * raw_l;
+sq_r = raw_r * raw_r;
+
+// Save current squared values to memory ring buffer
+rms_buffer[rms_ptr * 2] = sq_l;
+rms_buffer[rms_ptr * 2 + 1] = sq_r;
+
+// Add new squared values back to global running tracker sums
+rms_sum_l += sq_l;
+rms_sum_r += sq_r;
+
+// Advance ring buffer index pointer
+rms_ptr += 1;
+rms_ptr >= rms_window ? rms_ptr = 0;
+
+// Calculate Root-Mean-Square value safely (clamped to prevent log issues)
+calc_rms_l = sqrt(max(0.000001, rms_sum_l / rms_window));
+calc_rms_r = sqrt(max(0.000001, rms_sum_r / rms_window));
+
+// Link channels by choosing the highest global energy node
+rms_linked = max(calc_rms_l, calc_rms_r);
+rms_db = 20 * log10(rms_linked);
+
+// STEP 2: Pure Hard-Knee Over-Threshold Computation
+target_gr_db = 0.0;
+rms_db > thresh_db ? (
+  // Pure mathematical representation of classic DBX hard-angle transfer curves
+  target_gr_db = (rms_db - thresh_db) * (1.0 - (1.0 / ratio));
+);
+
+// STEP 3: Program-Dependent VCA Timing Engine
+// Hardware VCA release speeds scale dynamically depending on the amount of compression
+// Deep gain reduction triggers a faster envelope snap back to keep the audio forward.
+current_gr_delta = abs(target_gr_db - env_gr);
+
+// Dynamic coefficients calculation loop
+// Base times: Attack matches hardware spec (~15ms for small steps), release trails contextually
+atk_ms = max(1.0, 15.0 - (current_gr_delta * 0.5));
+rel_db_per_sec = 120.0 + (env_gr * 4.0); // Faster recovery out of deep compression dips
+rel_ms = (1.0 / rel_db_per_sec) * 1000.0;
+
+atk_coef = exp(-1.0 / (srate * (atk_ms / 1000.0)));
+rel_coef = exp(-1.0 / (srate * (rel_ms / 1000.0)));
+
+// Run internal smoother block
+target_gr_db > env_gr ? (
+  env_gr = (env_gr * atk_coef) + (target_gr_db * (1.0 - atk_coef));
+) : (
+  env_gr = (env_gr * rel_coef) + (target_gr_db * (1.0 - rel_coef));
+);
+
+// Translate back to a linear gain multiplier scale
+vca_gain = 10 ^ (-env_gr / 20);
+
+// STEP 4: Output VCA Makeup & Parallel Summing Path
+comp_l = raw_l * vca_gain * out_gain;
+comp_r = raw_r * vca_gain * out_gain;
+
+// Apply processing mix lines
+spl0 = (comp_l * mix_wet) + (raw_l * mix_dry);
+spl1 = (comp_r * mix_wet) + (raw_r * mix_dry);
+
+
+// ==========================================
+// VINTAGE VU METER GUI GRAPHICS
+// ==========================================
+@gfx 450 110
+
+// Fill background container (Chamber Black Vibe)
+gfx_r = 0.10; gfx_g = 0.10; gfx_b = 0.11; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Determine active signal source data value based on Selected Meter Mode switch
+meter_mode == 0 ? (
+  // Input Level: Average peak tracking
+  raw_sig = 20 * log10(max(0.00001, max(abs(raw_l), abs(raw_r))));
+  target_meter = max(-20, min(3, raw_sig));
+) : meter_mode == 1 ? (
+  // Output Level
+  raw_sig = 20 * log10(max(0.00001, max(abs(spl0), abs(spl1))));
+  target_meter = max(-20, min(3, raw_sig));
+) : (
+  // Gain Change / Reduction
+  target_meter = -env_gr;
+);
+
+// Emulate hardware ballistic dampening properties on needle bounce
+meter_smooth = (meter_smooth * 0.91) + (target_meter * 0.09);
+
+// Draw physical bounding housing box frame for the VU strip
+m_x = 20; m_y = 20; m_w = gfx_w - 40; m_h = 45;
+gfx_set(0.18, 0.18, 0.19, 1.0);
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.35, 0.35, 0.37, 1.0);
+gfx_rect(m_x, m_y, m_w, m_h, 0);
+
+// Print basic reference tick points across the layout scale
+gfx_set(0.6, 0.6, 0.6, 0.4);
+i = 0;
+while(i <= 10) (
+  tick_x = m_x + (i / 10) * m_w;
+  gfx_line(tick_x, m_y + m_h - 6, tick_x, m_y + m_h);
+  i += 1;
+);
+
+// Map smooth needle values to absolute screen pixel dimensions
+// Scale spans from -20dB on the far left up to +3dB on the right edge
+normalized_val = (meter_smooth - (-20)) / (3 - (-20));
+normalized_val = max(0.0, min(1.0, normalized_val));
+needle_x = m_x + (normalized_val * m_w);
+
+// Draw the dynamic glowing VU Needle indicator strip
+meter_mode == 2 ? (
+  gfx_set(0.95, 0.35, 0.1, 0.9); // Orange/Amber indicator for Gain Reduction tracking
+) : (
+  gfx_set(0.85, 0.85, 0.2, 0.9); // Clean yellow needle path for Audio levels
+);
+gfx_rect(needle_x - 2, m_y + 2, 4, m_h - 4, 1);
+
+// Lower info UI text labels block
+gfx_set(0.8, 0.8, 0.85, 0.95);
+gfx_x = 22; gfx_y = 80;
+meter_mode == 0 ? gfx_drawstr("METER MODE: INPUT LEVEL") :
+meter_mode == 1 ? gfx_drawstr("METER MODE: OUTPUT LEVEL") :
+gfx_drawstr("METER MODE: GAIN REDUCTION (dB)");
+
+gfx_x = gfx_w - 95; gfx_y = 80;
+meter_mode == 2 ? (
+  gfx_drawnumber(-env_gr, 1);
+) : (
+  gfx_drawnumber(target_meter, 1);
+);
+gfx_drawstr(" dB");

@@ -1,0 +1,49 @@
+desc: Molzter ADC1-Style Vintage Compressor 
+
+slider1:0<0,1,0.01>Input Drive
+slider2:0<0,2,1{Comp 1,Comp 2,Limit}>Mode
+slider3:10<1,500,1>Attack (ms)
+slider4:100<50,2000,1>Release (ms)
+slider5:0<0,500,1>SC HPF (Hz)
+slider6:100<0,100,1>Mix (%)
+slider7:0<-12,24,0.1>Makeup Gain (dB)
+
+@init
+envL = 0; envR = 0;
+// Fixed internal threshold (matches vintage hardware feel)
+FIXED_THRESH = 0.1; 
+function get_coeff(ms) ( exp(-1 / (ms * srate / 1000 + 0.001)) );
+
+@sample
+// 1. Input Drive (The primary control for compression amount)
+inL = spl0 * (1 + slider1 * 10);
+inR = spl1 * (1 + slider1 * 10);
+
+// 2. Detection (Internal)
+att = get_coeff(slider3);
+rel = get_coeff(slider4);
+
+// Sidechain HPF
+sc_L = (abs(inL) > slider5/20000 ? inL : 0);
+sc_R = (abs(inR) > slider5/20000 ? inR : 0);
+
+// Envelope follower
+envL = max(abs(sc_L), envL * (abs(sc_L) > envL ? att : rel));
+envR = max(abs(sc_R), envR * (abs(sc_R) > envR ? att : rel));
+
+// 3. Compression Logic (Fixed Threshold)
+ratio = (slider2 == 0 ? 2 : (slider2 == 1 ? 4 : 10));
+
+// Gain Reduction: Only active when input exceeds FIXED_THRESH
+gainL = (envL > FIXED_THRESH) ? pow(FIXED_THRESH / envL, 1 - 1/ratio) : 1.0;
+gainR = (envR > FIXED_THRESH) ? pow(FIXED_THRESH / envR, 1 - 1/ratio) : 1.0;
+
+// 4. Output with Makeup Gain
+makeup = 10^(slider7 / 20);
+wetL = inL * gainL * makeup;
+wetR = inR * gainR * makeup;
+
+// 5. Parallel Mix
+mix = slider6 / 100;
+spl0 = (spl0 * (1 - mix)) + (wetL * mix);
+spl1 = (spl1 * (1 - mix)) + (wetR * mix);

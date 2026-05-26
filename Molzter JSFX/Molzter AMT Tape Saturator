@@ -1,0 +1,53 @@
+desc: Molzter AMT Tape Saturator 
+
+slider1:0<0,1,0.01>Drive
+slider2:0<0,3,1{Modern,Vintage,Dark,Lo-Fi}>Model
+slider3:0<0,1,0.01>Tape Condition (Age)
+slider4:0<0,1,0.01>Wow & Flutter
+slider5:0<0,1,0.01>Dropouts
+slider6:0<0,1,0.01>Noise Floor
+slider7:0<-12,12,0.1>Output (dB)
+
+@init
+// Algebraic Tanh approximation (No 'exp' or 'exp2' needed)
+// This is perfectly safe for all EEL2 environments
+function my_tanh(x) (
+    x2 = x * x;
+    (x * (27 + x2)) / (27 + 9 * x2);
+);
+
+function get_sat(x, m) (
+    m == 0 ? x / (1 + abs(x)) :
+    m == 1 ? x / (1 + pow(abs(x), 1.5)) :
+    m == 2 ? x / (1 + abs(x) * 1.5) :
+    my_tanh(x * 1.5) 
+);
+
+@sample
+// 1. Noise Floor 
+noise = (rand(2) - 1) * slider6 * 0.001;
+
+// 2. Wow & Flutter
+phase += 0.0005 + (slider4 * 0.005);
+wobble = sin(phase) * slider4 * 0.02;
+
+// 3. Dropouts
+dropout = (rand(1) < (slider5 * 0.0001)) ? (1 - slider5) : 1;
+
+// 4. Tape Condition (Age)
+// Using a basic one-pole filter for compatibility
+cutoff = 0.1 * (1 - (slider3 * 0.9));
+lp = lp + cutoff * (spl0 + wobble - lp);
+
+// 5. Drive & Model Processing
+in = (lp + noise) * (1 + slider1 * 5) * dropout;
+out = get_sat(in, slider2);
+
+// 6. Auto Gain Makeup
+makeup = 1 + (slider1 * 0.4);
+out *= makeup;
+
+// 7. Output
+out_g = 10^(slider7 / 20);
+spl0 = out * out_g;
+spl1 = out * out_g;

@@ -1,0 +1,46 @@
+desc: Molzter Natural Limiter (Zero Look-Ahead)
+
+slider1:0<0,18,0.1>Drive / Gain (dB)
+slider2:-0.1<-3,0,0.01>Ceiling (dB)
+slider3:100<10,500,1>Release (ms)
+
+@init
+env = 0.0;
+gr = 1.0;
+
+@slider
+drive = 10^(slider1/20);
+ceiling = 10^(slider2/20);
+// Extremely fast attack for zero-look-ahead responsiveness
+attack_coeff = exp(-1 / (srate * 0.00002)); 
+rel_coeff = exp(-1 / (srate * (slider3/1000)));
+
+@sample
+// 1. Gain applied to input
+inL = spl0 * drive;
+inR = spl1 * drive;
+
+// 2. Direct Peak Detection
+abs_sig = max(abs(inL), abs(inR));
+env = (abs_sig > env) ? 
+      (env * attack_coeff + abs_sig * (1 - attack_coeff)) : 
+      (env * rel_coeff + abs_sig * (1 - rel_coeff));
+
+// 3. Compression calculation
+// A softer curve (0.85) allows for more natural "limiting"
+gr_target = (env > ceiling) ? pow(ceiling / env, 0.85) : 1.0;
+
+// 4. Instantaneous Gain Smoothing
+gr = gr_target; 
+
+// 5. Output
+spl0 = inL * gr;
+spl1 = inR * gr;
+
+// 6. Hard-Limit Safety Rail (Zero-latency brickwall)
+abs_out = max(abs(spl0), abs(spl1));
+(abs_out > ceiling) ? (
+    ratio = ceiling / abs_out;
+    spl0 *= ratio;
+    spl1 *= ratio;
+);

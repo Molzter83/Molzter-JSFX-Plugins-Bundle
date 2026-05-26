@@ -1,0 +1,219 @@
+desc: Molzter TLA-100A Tube Leveling Amplifier
+author: Molzterr
+version: 1.0
+
+slider1:0<0,10,0.1> Gain Control (Input Drive)
+slider2:0<0,10,0.1> Gain Reduction (Threshold)
+slider3:1<0,2,1{Fast, Medium, Slow}> Attack Time Switch
+slider4:1<0,2,1{Fast, Medium, Slow}> Release Time Switch
+slider5:0<0,1,1{Gain Reduction, Output Level}> Meter Selector Mode
+slider6:0<-20,20,0.1> Output Level Trim (dB)
+slider7:0<0,10,0.1> Tube Saturation Drive
+
+@init
+log2db = 8.6858896380650365530225783783321; 
+db2log = 0.11512925464970228420089957273422; 
+
+// Explicitly define tracking states at boot to prevent UI thread initialization crashes
+env_state = 0.0;
+meter_smooth = 0.0;
+out_peak_track = 0.0;
+meter_mode = 0;
+sat_intensity = 0.0;
+
+@slider
+// The "Gain" control on a TLA-100A drives the input transformer stage directly
+in_drive = slider1 * 3.5; 
+thresh_scale = slider2;
+meter_mode = slider5;
+out_trim = 10 ^ (slider6 / 20);
+
+// Saturation multiplier scales exponentially with knob value
+sat_intensity = slider7 * 0.45;
+
+// Emulate the discrete 3-way hardware switches for Attack/Release ballistics
+slider3 == 0 ? att_ms = 1.5;   // Fast
+slider3 == 1 ? att_ms = 15.0;  // Medium
+slider3 == 2 ? att_ms = 60.0;  // Slow
+
+slider4 == 0 ? rel_ms = 50.0;   // Fast
+slider4 == 1 ? rel_ms = 300.0;  // Medium
+slider4 == 2 ? rel_ms = 1200.0; // Slow
+
+att_alpha = 1.0 - exp(-1.0 / (srate * (att_ms / 1000.0)));
+rel_alpha = 1.0 - exp(-1.0 / (srate * (rel_ms / 1000.0)));
+
+@sample
+// STAGE 1: Input Gain Drive Stage
+s0_input = spl0 * (10 ^ (in_drive / 20));
+s1_input = spl1 * (10 ^ (in_drive / 20));
+
+// STAGE 2: Envelope Sensing
+side_rect = max(abs(s0_input), abs(s1_input));
+side_db = 20 * log10(max(0.00001, side_rect));
+
+// Calculate threshold baseline scaled to the physical "Gain Reduction" pot 
+calc_threshold = 12.0 - (thresh_scale * 5.5);
+excess_db = side_db - calc_threshold;
+
+target_gr = 0.0;
+excess_db > 0.0 ? (
+  // Soft knee optical behavior characteristic of TLA leveling profiles
+  dynamic_ratio = 2.0 + (excess_db * 0.15);
+  target_gr = excess_db * (1.0 - (1.0 / dynamic_ratio));
+);
+
+// STAGE 3: Photo-Cell Time Ballistics Integration
+env_state = target_gr > env_state ? 
+            env_state + (target_gr - env_state) * att_alpha : 
+            env_state + (target_gr - env_state) * rel_alpha;
+            
+gr_attenuation = 10 ^ (-env_state / 20);
+
+// Apply optical gain attenuation before entering the high-voltage tube saturation matrix
+s0_attenuated = s0_input * gr_attenuation;
+s1_attenuated = s1_input * gr_attenuation;
+
+// STAGE 4: Dedicated 12AX7 Tube Saturation Circuitry
+sat_intensity > 0 ? (
+  // Boost signal entering clipper based on Saturation knob
+  drive_factor = 1.0 + sat_intensity;
+  s0_driven = s0_attenuated * drive_factor;
+  s1_driven = s1_attenuated * drive_factor;
+  
+  // Asymmetric mathematical waveshaping (adds rich even-order and warm odd-order harmonics)
+  s0_sat = s0_driven > 0.75 ? 0.75 + (s0_driven - 0.75) / (1.0 + (s0_driven - 0.75)^2) : s0_driven;
+  s0_sat = s0_sat < -0.65 ? -0.65 + (s0_sat + 0.65) / (1.0 + (s0_sat + 0.65)^2) : s0_sat;
+  
+  s1_sat = s1_driven > 0.75 ? 0.75 + (s1_driven - 0.75) / (1.0 + (s1_driven - 0.75)^2) : s1_driven;
+  s1_sat = s1_sat < -0.65 ? -0.65 + (s1_sat + 0.65) / (1.0 + (s1_sat + 0.65)^2) : s1_sat;
+  
+  // Compensate output scaling down to keep volume levels integrated cleanly
+  s0_attenuated = s0_sat / (1.0 + (sat_intensity * 0.45));
+  s1_attenuated = s1_sat / (1.0 + (sat_intensity * 0.45));
+);
+
+// STAGE 5: Final Output Gain Termination
+spl0_out = s0_attenuated * out_trim;
+spl1_out = s1_attenuated * out_trim;
+
+spl0 = spl0_out;
+spl1 = spl1_out;
+
+// Feed the dual-mode VU visual layout calculations
+out_peak_track = max(out_peak_track, max(abs(spl0_out), abs(spl1_out)));
+meter_smooth = (meter_smooth * 0.88) + (env_state * 0.12);
+
+// ====================================================
+// SUMMIT AUDIO TLA-100A VINTAGE BLACK/NAVY FACEPLATE
+// ====================================================
+@gfx 620 310
+
+// Base Chassis Surface (Signature Dark Textured Charcoal Finish)
+gfx_r = 0.15; gfx_g = 0.17; gfx_b = 0.19; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Outer frame structural border inlay lines
+gfx_set(0.08, 0.09, 0.11, 0.6);
+gfx_rect(12, 12, gfx_w - 24, gfx_h - 24, 0);
+
+// ----------------------------------------------------
+// VINTAGE BACKLIT GLOWING RADIAL VU METRIC DISPLAY
+// ----------------------------------------------------
+m_w = 210; m_h = 105;
+m_x = gfx_w - m_w - 35; m_y = 35;
+needle_len = 82;
+
+gfx_set(0.05, 0.06, 0.07, 1.0); // Outer frame bezel lip
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+
+// Active warm glowing amber incandescence display panel face
+gfx_set(0.95, 0.84, 0.52, 1.0);
+gfx_rect(m_x + 5, m_y + 5, m_w - 10, m_h - 10, 1);
+
+pivot_x = m_x + (m_w / 2);
+pivot_y = m_y + m_h - 10;
+
+// Meter Routing Selector Toggle Logic
+meter_mode == 0 ? (
+  // MODE A: GAIN REDUCTION VIEW (0dB rests right, compresses down leftward)
+  needle_clamped = min(20, meter_smooth);
+  angle = -0.42 - (needle_clamped / 20) * 1.95;
+) : (
+  // MODE B: OUTPUT VOLTAGE PEAK VIEW (-20dB left, swings upward right past 0dB)
+  db_out = out_peak_track > 0.00001 ? 20 * log10(out_peak_track) : -20.0;
+  db_out < -20.0 ? db_out = -20.0; db_out > 3.0 ? db_out = 3.0;
+  norm_out = (db_out + 20.0) / 23.0;
+  angle = -2.37 + (norm_out * 1.95);
+);
+
+tip_x = pivot_x + cos(angle) * needle_len;
+tip_y = pivot_y + sin(angle) * needle_len;
+
+// Draw Screen Reticle Metrics Text Lines
+gfx_set(0.10, 0.10, 0.10, 0.65);
+gfx_setfont(1, "Arial", 11, 'b');
+meter_mode == 0 ? (
+  gfx_x = m_x + 22;  gfx_y = m_y + 50; gfx_drawstr("-20");
+  gfx_x = m_x + 55;  gfx_y = m_y + 24; gfx_drawstr("-10");
+  gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("-5");
+  gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-2");
+  gfx_x = m_x + 180; gfx_y = m_y + 50; gfx_drawstr("0");
+  gfx_x = m_x + 15;  gfx_y = m_y + 82; gfx_drawstr("TLA-100A - REDUCTION (dB)");
+) : (
+  gfx_x = m_x + 22;  gfx_y = m_y + 50; gfx_drawstr("-20");
+  gfx_x = m_x + 55;  gfx_y = m_y + 24; gfx_drawstr("-10");
+  gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("0 VU");
+  gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("+1");
+  gfx_x = m_x + 180; gfx_y = m_y + 50; gfx_drawstr("+3");
+  gfx_x = m_x + 15;  gfx_y = m_y + 82; gfx_drawstr("TLA-100A - OUTPUT VU");
+);
+
+// Draw Physical Mechanical Pointer Needle
+gfx_set(0.02, 0.02, 0.02, 1.0);
+gfx_line(pivot_x, pivot_y, tip_x, tip_y, 1);
+gfx_line(pivot_x - 1, pivot_y, tip_x - 1, tip_y, 0);
+
+// Clear the peak tracking register safely every single graphics refresh loop frame
+out_peak_track = 0.0;
+
+// ----------------------------------------------------
+// TELEMETRY VALUE PARAMETER READOUT STRIPS PANEL
+// ----------------------------------------------------
+gfx_set(0.08, 0.10, 0.11, 0.45);
+gfx_rect(32, 35, 290, 175, 1);
+gfx_set(0.18, 0.20, 0.22, 0.35);
+gfx_rect(32, 35, 290, 175, 0);
+
+gfx_set(0.92, 0.94, 0.96, 0.9); // Metallic white lettering typography ink
+gfx_setfont(1, "Arial", 11, 'b');
+gfx_x = 48; gfx_y = 48;  gfx_drawstr(sprintf(#, "GAIN POTENTIOMETER: %.1f", slider1));
+gfx_x = 48; gfx_y = 74;  gfx_drawstr(sprintf(#, "GAIN REDUCTION:    %.1f", slider2));
+gfx_x = 48; gfx_y = 100; gfx_drawstr(sprintf(#, "TUBE SATURATION:   %.1f", slider7));
+
+gfx_x = 48; gfx_y = 126; 
+slider3 == 0 ? gfx_drawstr("ATTACK SPEED:      FAST (1.5ms)") :
+slider3 == 1 ? gfx_drawstr("ATTACK SPEED:      MID (15ms)") :
+               gfx_drawstr("ATTACK SPEED:      SLOW (60ms)");
+
+gfx_x = 48; gfx_y = 152; 
+slider4 == 0 ? gfx_drawstr("RELEASE SPEED:     FAST (50ms)") :
+slider4 == 1 ? gfx_drawstr("RELEASE SPEED:     MID (300ms)") :
+               gfx_drawstr("RELEASE SPEED:     SLOW (1.2s)");
+
+// ----------------------------------------------------
+// LOWER CONTROLLER AND EXTRUDED SYSTEM BRANDING FOOTER
+// ----------------------------------------------------
+gfx_set(0.08, 0.10, 0.11, 0.3);
+gfx_rect(32, 235, gfx_w - 68, 42, 1);
+gfx_set(0.18, 0.20, 0.22, 0.25);
+gfx_rect(32, 235, gfx_w - 68, 42, 0);
+
+gfx_setfont(1, "Impact", 16, 'i');
+gfx_set(0.65, 0.70, 0.75, 0.85); // Silver-steel faceplate logo engraving
+gfx_x = 48; gfx_y = 247; gfx_drawstr("TLA-100A");
+
+gfx_setfont(1, "Arial", 11, 'b');
+gfx_set(0.92, 0.94, 0.96, 0.9);
+gfx_x = gfx_w - 205; gfx_y = 249;
+gfx_drawstr(sprintf(#, "OUTPUT TRIM: %.1f dB", slider6));

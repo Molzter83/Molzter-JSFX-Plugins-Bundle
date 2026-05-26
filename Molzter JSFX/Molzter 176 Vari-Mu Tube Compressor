@@ -1,0 +1,184 @@
+desc: Molzter 176 Vari-Mu Tube Compressor 
+author: Molzter
+version: 1.0.0
+
+slider1:0<0,30,0.1> Input Drive / Record (dB)
+slider2:0<0,3,1{2:1 Soft Leveller, 4:1 Medium Glue, 8:1 Assertive, 12:1 Firm Limiting}> Ratio Selection
+slider3:100<5,200,1> Attack Time Constant
+slider4:200<50,1000,5> Release Time Constant
+slider5:0<0,1,1{Resistor Path (Vintage Thump), Transformer Path (Fast Air)}> Stage Coupling
+slider6:0<0,2,1{Both Halves, Positive Only, Negative Only}> Sidechain Polarity Detection
+slider7:0<-12,24,0.1> Output Reproduce Level (dB)
+
+@init
+// Interstage feedback network capacitors
+env_state = 0.0;
+vu_smooth = 0.0;
+
+// Tube grid asymmetry modeling registers
+dc_bias = 0.0;
+
+@slider
+in_gain = 10 ^ (slider1 / 20);
+out_gain = 10 ^ (slider7 / 20);
+
+// Map the hardware ratio configurations (modifies the internal fixed compression curve)
+ratio_idx = slider2;
+ratio_val = (ratio_idx == 0) ? 2.0 : (ratio_idx == 1) ? 4.0 : (ratio_idx == 2) ? 8.0 : 12.0;
+
+// Transformer path path modifications: speeds up attack handling and slightly tilts the high end
+att_mod = (slider5 == 1) ? 0.45 : 1.0;
+rel_mod = (slider5 == 1) ? 0.85 : 1.0;
+
+att_alpha = 1.0 - exp(-1.0 / (srate * ((slider3 * att_mod) / 1000.0)));
+rel_alpha = 1.0 - exp(-1.0 / (srate * ((slider4 * rel_mod) / 1000.0)));
+
+// Fixed internal detection threshold baseline in dB
+fixed_threshold = -24.0;
+
+@sample
+// Cache raw state
+s0 = spl0; s1 = spl1;
+
+// STAGE 1: Polarity-Selective Sidechain Filtering
+// Alters how the tube detector reacts to asymmetrical waveforms like vocals
+sc_sig = (s0 + s1) * 0.5;
+
+slider6 == 1 ? (
+  sc_sig = max(0.0, sc_sig); // Positive cycles only
+) : slider6 == 2 ? (
+  sc_sig = min(0.0, sc_sig); // Negative cycles only
+);
+
+// STAGE 2: Logarithmic Fixed-Threshold Tube Calculation
+db_sc = 20 * log10(max(0.00001, abs(sc_sig * in_gain)));
+
+target_gr = 0.0;
+db_sc > fixed_threshold ? (
+  excess = db_sc - fixed_threshold;
+  
+  // Ratio-driven variable knee configuration curves
+  knee_factor = 1.0 - (1.0 / ratio_val);
+  target_gr = excess * knee_factor;
+);
+
+// STAGE 3: Program-Dependent Resistor-Capacitor Timing Logic
+// The envelope moves faster depending on current signal amplitude non-linearities
+gr_delta = target_gr - env_state;
+dynamic_mod = 1.0 + (abs(gr_delta) * 0.05);
+
+env_state = gr_delta > 0 ? 
+  env_state + gr_delta * att_alpha * dynamic_mod : 
+  env_state + gr_delta * rel_alpha / dynamic_mod;
+
+// Convert gain attenuation coefficient back out
+attenuation = 10 ^ (-env_state / 20);
+
+// STAGE 4: Variable-Mu 6BC8 All-Valve Amplification & Saturation
+spl0 = s0 * in_gain * attenuation;
+spl1 = s1 * in_gain * attenuation;
+
+// Add 3rd-order harmonic fatness and asymmetric 2nd-order warmth from the line stage
+spl0 = spl0 + 0.025 * (spl0 ^ 2) - 0.008 * (spl0 ^ 3);
+spl1 = spl1 + 0.025 * (spl1 ^ 2) - 0.008 * (spl1 ^ 3);
+
+// STAGE 5: Output Line Makeup Gain Control
+spl0 *= out_gain;
+spl1 *= out_gain;
+
+// STAGE 6: Visual Analytics Interpolation Core
+// Gain reduction mapping: rest position is 0dB, swings left/downwards under compression
+vu_smooth = (vu_smooth * 0.88) + (env_state * 0.12);
+
+
+// ====================================================
+// RELAB 176 TUBE SLATE-GREY RETRO GRAPHICS INTERFACE
+// ====================================================
+@gfx 620 280
+
+// Base chassis paint (Relab Retro Deep Dark Slate Green/Gray Enamel)
+gfx_r = 0.22; gfx_g = 0.26; gfx_b = 0.27; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Brushed aluminum border perimeter accent highlights
+gfx_set(0.42, 0.46, 0.48, 0.35);
+gfx_rect(8, 8, gfx_w - 16, gfx_h - 16, 0);
+
+// ----------------------------------------------------
+// LARGE CIRCULAR VINTAGE RETRO TUBE VU GAUGE
+// ----------------------------------------------------
+m_radius = 65;
+m_x = 485; m_y = 135; // Positioned over on the right wing panel slot
+
+// Outer circular frame housing boundaries
+gfx_set(0.12, 0.13, 0.14, 1.0);
+gfx_circle(m_x, m_y, m_radius, 1);
+gfx_set(0.88, 0.86, 0.80, 1.0); // True historic parchment white color card face
+gfx_circle(m_x, m_y, m_radius - 4, 1);
+
+// Math for mechanical pivoting needle movement vector paths
+// Default rest state is 0 VU (sitting far right) -> sweeps clockwise/leftward down
+needle_angle = -0.35 - (min(20, vu_smooth) / 20) * 2.25;
+needle_len = 54;
+
+tip_x = m_x + cos(needle_angle) * needle_len;
+tip_y = m_y + sin(needle_angle) * needle_len;
+
+// Reference ticks text mapping inside the white circle gauge card
+gfx_set(0.16, 0.15, 0.15, 0.55);
+gfx_x = m_x - 48;  gfx_y = m_y + 12; gfx_drawstr("-20");
+gfx_x = m_x - 42;  gfx_y = m_y - 28; gfx_drawstr("-10");
+gfx_x = m_x - 12;  gfx_y = m_y - 48; gfx_drawstr("-5");
+gfx_x = m_x + 22;  gfx_y = m_y - 28; gfx_drawstr("-2");
+gfx_x = m_x + 32;  gfx_y = m_y + 12; gfx_drawstr("0");
+
+gfx_set(0.55, 0.15, 0.15, 0.7);
+gfx_x = m_x - 28;  gfx_y = m_y + 36; gfx_drawstr("VARIABLE-MU");
+
+// Draw the elegant physical tapered black pointer needle line
+gfx_set(0.08, 0.08, 0.10, 1.0);
+gfx_line(m_x, m_y, tip_x, tip_y, 1);
+gfx_circle(m_x, m_y, 5, 1); // Center mechanical pivot screw head cap
+
+
+// ----------------------------------------------------
+// RETRO CONTINUOUS SIGNAL BALANCED PARAMETERS CARD
+// ----------------------------------------------------
+gfx_set(0.12, 0.15, 0.16, 0.45); // Recessed text background plate panel
+gfx_rect(28, 28, 340, 150, 1);
+gfx_set(0.35, 0.40, 0.42, 0.3);
+gfx_rect(28, 28, 340, 150, 0);
+
+gfx_set(0.94, 0.96, 0.96, 0.95); // Vintage white enamel ink labels
+gfx_x = 44; gfx_y = 44;  gfx_drawstr(sprintf(#, "INPUT DRIVE:   %+.1f dB", slider1));
+gfx_x = 44; gfx_y = 74;  gfx_drawstr(sprintf(#, "ATTACK SECTOR:  %.1f units", slider3));
+gfx_x = 44; gfx_y = 104; gfx_drawstr(sprintf(#, "RELEASE SECTOR: %.1f units", slider4));
+gfx_x = 44; gfx_y = 134; gfx_drawstr(sprintf(#, "OUTPUT LEVEL:  %+.1f dB", slider7));
+
+
+// ----------------------------------------------------
+// LOWER CONTROL HOUSING SELECTION SWITCHES PANEL
+// ----------------------------------------------------
+gfx_set(0.12, 0.15, 0.16, 0.25);
+gfx_rect(28, 202, gfx_w - 56, 50, 1);
+gfx_set(0.35, 0.40, 0.42, 0.3);
+gfx_rect(28, 202, gfx_w - 56, 50, 0);
+
+gfx_set(0.85, 0.88, 0.90, 0.85);
+
+// Ratio string map presentation block
+gfx_x = 42; gfx_y = 220;
+slider2 == 0 ? gfx_drawstr("RATIO: 2:1 (SOFT KNEE)") :
+slider2 == 1 ? gfx_drawstr("RATIO: 4:1 (MEDIUM GLUE)") :
+slider2 == 2 ? gfx_drawstr("RATIO: 8:1 (ASSERTIVE)") :
+               gfx_drawstr("RATIO: 12:1 (FIRM LIMIT)");
+
+// Component paths telemetry print mapping
+gfx_x = 245;
+slider5 == 0 ? gfx_drawstr("PATH: RESISTOR (THUMP)") : gfx_drawstr("PATH: XFORMER (FAST AIR)");
+
+// Detector orientation print mapping
+gfx_x = 440;
+slider6 == 0 ? gfx_drawstr("SC: FULL CYCLES") :
+slider6 == 1 ? gfx_drawstr("SC: POSITIVE ONLY") :
+               gfx_drawstr("SC: NEGATIVE ONLY");

@@ -1,0 +1,85 @@
+desc: Molzter Mastering Compressor & Ambience Unit 
+author: Molzter
+version: 1.0
+
+slider1:0<-20,20,0.1> Input Gain (dB)
+slider2:0<-40,10,0.1> Compression Threshold (dB)
+slider3:1.5<1.0,6.0,0.05> Ratio Setting (:1)
+slider4:25<5,150,1> RMS Release Timing (ms)
+slider5:0<0,100,1> Release Hysteresis (%)
+slider6:0<0,1,1{Standard Compress, Ambiance Extract}> Processing Mode
+slider7:0<0,1,1{Off, 90 Hz}> Sidechain HPF Filter
+slider8:0<-12,12,0.1> Output Mastering Gain (dB)
+
+@init
+function get_coeff(ms) ( exp(-1.0 / (srate * (ms / 1000.0))); );
+
+rms_l = rms_r = 0.0;
+env_slow_l = env_slow_r = 0.0;
+env_fast_l = env_fast_r = 0.0;
+sc_hp_l = sc_hp_r = 0;
+// Display smoothing buffers
+disp_env_slow_l = disp_env_slow_r = 0;
+disp_env_fast_l = disp_env_fast_r = 0;
+
+@slider
+in_gain = 10 ^ (slider1 / 20);
+out_gain = 10 ^ (slider8 / 20);
+rms_coef = 1.0 - exp(-1.0 / (srate * 0.03));
+att_coef = get_coeff(2.0);
+rel_slow_coef = get_coeff(slider4);
+rel_fast_coef = get_coeff(slider4 * (1.0 - (slider5 / 100 * 0.65)));
+sc_alpha = (1.0 / (2 * $pi * 90)) / ((1.0 / (2 * $pi * 90)) + (1.0 / srate));
+
+@sample
+orig_l = spl0; orig_r = spl1;
+in_l = orig_l * in_gain; in_r = orig_r * in_gain;
+
+// Sidechain with HPF
+sc_l = slider7 ? (sc_alpha * (in_l - sc_hp_l); sc_hp_l = in_l) : in_l;
+sc_r = slider7 ? (sc_alpha * (in_r - sc_hp_r); sc_hp_r = in_r) : in_r;
+
+// RMS Calculation
+rms_l = (1.0 - rms_coef) * rms_l + rms_coef * (sc_l * sc_l);
+rms_r = (1.0 - rms_coef) * rms_r + rms_coef * (sc_r * sc_r);
+db_rms_l = 10 * log10(max(0.000001, rms_l));
+db_rms_r = 10 * log10(max(0.000001, rms_r));
+
+// Gain Reduction Logic
+gr_target_l = max(0, (db_rms_l - slider2) * (1.0 - (1.0 / slider3)));
+gr_target_r = max(0, (db_rms_r - slider2) * (1.0 - (1.0 / slider3)));
+
+// Ballistics (Slow/Fast Tracking)
+env_slow_l = (gr_target_l > env_slow_l) ? (env_slow_l * att_coef) + (gr_target_l * (1.0 - att_coef)) : (env_slow_l * rel_slow_coef) + (gr_target_l * (1.0 - rel_slow_coef));
+env_slow_r = (gr_target_r > env_slow_r) ? (env_slow_r * att_coef) + (gr_target_r * (1.0 - att_coef)) : (env_slow_r * rel_slow_coef) + (gr_target_r * (1.0 - rel_slow_coef));
+env_fast_l = (gr_target_l > env_fast_l) ? (env_fast_l * att_coef) + (gr_target_l * (1.0 - att_coef)) : (env_fast_l * rel_fast_coef) + (gr_target_l * (1.0 - rel_fast_coef));
+env_fast_r = (gr_target_r > env_fast_r) ? (env_fast_r * att_coef) + (gr_target_r * (1.0 - att_coef)) : (env_fast_r * rel_fast_coef) + (gr_target_r * (1.0 - rel_fast_coef));
+
+// Smoothing for GUI meters
+disp_env_slow_l += (env_slow_l - disp_env_slow_l) * 0.05;
+disp_env_slow_r += (env_slow_r - disp_env_slow_r) * 0.05;
+
+// Output Processing
+gr_factor_l = 10 ^ (-env_slow_l / 20); gr_factor_r = 10 ^ (-env_slow_r / 20);
+slider6 == 0 ? (spl0 = in_l * gr_factor_l * out_gain; spl1 = in_r * gr_factor_r * out_gain) 
+             : (spl0 = (in_l - (in_l * gr_factor_l)) * out_gain; spl1 = (in_r - (in_r * gr_factor_r)) * out_gain);
+
+@gfx 640 260
+gfx_r = 0.07; gfx_g = 0.08; gfx_b = 0.09; gfx_a = 1.0; gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_set(0.11, 0.13, 0.15, 1.0); gfx_rect(0, 0, gfx_w, 32);
+
+// Header
+gfx_set(0.85, 0.88, 0.9, 0.85); gfx_x = 20; gfx_y = 10; gfx_drawstr("MASTERING CONSOLE: GAIN REDUCTION MONITOR");
+
+// Meter Drawing Function
+function draw_meter(x, y, w, h, val, label) (
+  gfx_set(0.03, 0.04, 0.05, 1.0); gfx_rect(x, y, w, h, 1); // BG
+  gfx_set(0.25, 0.75, 0.45, 0.75); gfx_rect(x, y + h - min(h, (val/16)*h), w, min(h, (val/16)*h), 1); // Bar
+  gfx_set(1, 1, 1, 0.8); gfx_x = x; gfx_y = y + h + 5; gfx_drawstr(label);
+  gfx_x = x + w/2 - 10; gfx_y = y + h + 25; gfx_drawstr(sprintf(#, "-%.1fdB", val));
+);
+
+// Draw L/R Meters
+scr_w = (gfx_w - 60) / 2;
+draw_meter(45, 55, 60, 120, disp_env_slow_l, "L-GR");
+draw_meter(gfx_w/2 + 45, 55, 60, 120, disp_env_slow_r, "R-GR");

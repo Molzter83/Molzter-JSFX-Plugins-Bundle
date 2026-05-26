@@ -1,0 +1,72 @@
+desc: Molzter Zener Limiter
+
+slider1:0<0,2,1{L/R,Stereo Linked,M/S}>Processing Mode
+slider2:0<0,1,1{Low,High}>Input Impedance
+slider4:5<0,11,1>L Input Gain
+slider5:11<0,21,1>L Output Level
+slider6:2<0,2,1{Comp 1,Comp 2,Limit}>L Mode
+slider7:0<0,10,1>L Attack Step
+slider8:0<0,20,1>L Release Step
+slider9:0<0,5,1>L Sidechain HPF
+slider10:0<0,1,1{Active,Bypassed}>L THD Mode
+slider12:5<0,11,1>R Input Gain
+slider13:11<0,21,1>R Output Level
+slider14:2<0,2,1{Comp 1,Comp 2,Limit}>R Mode
+slider15:0<0,10,1>R Attack Step
+slider16:0<0,20,1>R Release Step
+slider17:0<0,5,1>R Sidechain HPF
+slider18:0<0,1,1{Active,Bypassed}>R THD Mode
+
+@init
+function diode_bridge(x, drive) (
+  x = x * drive;
+  (exp(x) - exp(-x)) / (exp(x) + exp(-x));
+);
+
+@slider
+// Link parameters when in Stereo Linked mode
+slider1 == 1 ? (
+  slider12 = slider4; slider13 = slider5; slider14 = slider6;
+  slider15 = slider7; slider16 = slider8; slider17 = slider9; slider18 = slider10;
+);
+
+// Gain calibration
+in_gain_l = exp((slider4 * 0.25)); 
+out_gain_l = exp((slider5 - 11) * 0.25);
+in_gain_r = exp((slider12 * 0.25));
+out_gain_r = exp((slider13 - 11) * 0.25);
+
+// Ballistics (Zener-style timing)
+att_l = (slider7 + 1) * 0.002;
+rel_l = (slider8 + 1) * 0.05;
+att_coef_l = 1.0 - exp(-1.0 / (srate * att_l));
+rel_coef_l = 1.0 - exp(-1.0 / (srate * rel_l));
+
+@sample
+// 1. Gain & Saturation
+drv_l = spl0 * in_gain_l;
+drv_r = spl1 * in_gain_r;
+
+// 2. Detection (Feed-Forward)
+thresh = (slider6 == 2) ? 0.3 : 0.6;
+env_l = abs(drv_l);
+env_r = abs(drv_r);
+
+target_l = env_l > thresh ? (thresh / env_l) : 1.0;
+target_r = env_r > thresh ? (thresh / env_r) : 1.0;
+
+// Envelope follower
+last_gr_l += (target_l - last_gr_l) * (target_l < last_gr_l ? att_coef_l : rel_coef_l);
+last_gr_r += (target_r - last_gr_r) * (target_r < last_gr_r ? att_coef_l : rel_coef_l);
+
+// 3. Output with Zener Diode Curve
+spl0 = diode_bridge(drv_l * last_gr_l, 1.2) * out_gain_l;
+spl1 = diode_bridge(drv_r * last_gr_r, 1.2) * out_gain_r;
+
+// 4. Metering
+vu_l = 20 * log10(max(0.001, last_gr_l));
+
+@gfx 300 100
+gfx_r=0.2; gfx_g=0.2; gfx_b=0.2; gfx_rect(10, 10, 280, 80);
+gfx_r=0; gfx_g=1; gfx_b=0;
+gfx_rect(150, 20, abs(vu_l) * 5, 20);

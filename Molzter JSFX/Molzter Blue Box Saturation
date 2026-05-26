@@ -1,0 +1,192 @@
+desc: Molzter Blue Box Saturation
+author: Molzter
+version: 1.0
+
+slider1:0<0,1,1{Stereo L/R, Mid/Side (M/S)}> Processing Mode
+slider2:0<0,20,0.1> Input Trim (dB)
+slider3:0<0,100,1> Pentode Tube Drive (%)
+slider4:0<0,100,1> Triode Tube Drive (%)
+slider5:0<0,100,1> Parallel Saturation Drive (%)
+slider6:0<4,11,1{Flat, Low, Flat/Low, Mid, High, Flat/High, All}> Sat. Filter Freq
+slider7:0<0,1,1{Default, Alt Tube}> Parallel Tube Selection
+slider8:0<0,1,1{Off, On}> Air Circuit Toggle
+slider9:0<0,6,0.1> Air Amount (dB)
+slider10:0<-20,20,0.1> Output Trim (dB)
+
+@init
+// Filter state registers for the parallel saturation line (M and S independent channels)
+p_m_lp1 = p_m_lp2 = p_m_hp1 = p_m_hp2 = 0;
+p_s_lp1 = p_s_lp2 = p_s_hp1 = p_s_hp2 = 0;
+
+// High-frequency Air shelving filter states
+air_m = air_s = 0;
+
+@slider
+// Input / Output Scalar Calculations
+in_gain  = 10 ^ (slider2 / 20);
+out_gain = 10 ^ (slider10 / 20);
+
+// Tube Stage Mix Alignments
+pent_amt = slider3 / 100;
+tri_amt  = slider4 / 100;
+sat_amt  = slider5 / 100;
+
+// Air Circuit Coefficients Calculation (12kHz Shelving Target)
+air_w0 = 2 * $pi * 12000 / srate;
+air_g  = 10 ^ (slider9 / 40);
+air_k  = (air_g - 1) / (air_g + 1);
+
+@sample
+// Capture Raw L/R Streams
+raw_l = spl0;
+raw_r = spl1;
+
+// STAGE 1: Input Routing & Matrix Integration
+slider1 == 1 ? (
+  // Encode L/R into Mid/Side spaces
+  ch_a = (raw_l + raw_r) * 0.5; // Mid Channel
+  ch_b = (raw_l - raw_r) * 0.5; // Side Channel
+) : (
+  ch_a = raw_l; // Standard Left
+  ch_b = raw_r; // Standard Right
+);
+
+// Apply Global Input Level Multipliers
+ch_a *= in_gain;
+ch_b *= in_gain;
+
+
+// ==========================================
+// CHANNEL A PROCESSING LAYER (Mid or Left)
+// ==========================================
+
+// 1. Parallel Saturation Path Isolation Filters
+sat_feed_a = ch_a;
+// Simple structural 6dB/oct low/high pass filter approximations for saturation bands
+slider6 == 1 || slider6 == 2 ? ( // Low filters
+  p_m_lp1 += (sat_feed_a - p_m_lp1) * (2 * $pi * 250 / srate);
+  sat_feed_a = p_m_lp1;
+);
+slider6 == 3 || slider6 == 4 ? ( // Mid/High filter windows
+  p_m_hp1 += (sat_feed_a - p_m_hp1) * (2 * $pi * 1000 / srate);
+  sat_feed_a -= p_m_hp1;
+);
+
+// 2. Drive the isolated parallel tube line
+// Alt tube choice activates harder asymmetrical compression quirks
+slider7 == 1 ? (
+  sat_out_a = sign(sat_feed_a) * (1.0 - exp(-abs(sat_feed_a * (1.0 + sat_amt * 4))));
+) : (
+  sat_out_a = sat_feed_a * (1.0 + sat_amt * 2) / (1.0 + abs(sat_feed_a * sat_amt));
+);
+ch_a += sat_out_a * sat_amt * 0.5; // Sum parallel tube back down
+
+// 3. Main Pentode Tube Core (Symmetrical Odd Harmonics via Hyperbolic Tangent)
+pent_sig_a = ch_a * (1.0 + pent_amt * 1.5);
+ch_a = (ch_a * (1.0 - pent_amt)) + (tan(min(1.5, max(-1.5, pent_sig_a))) * pent_amt);
+
+// 4. Main Triode Tube Core (Asymmetrical Even Harmonics via Offset Exponential curves)
+tri_sig_a = ch_a * (1.0 + tri_amt * 1.2);
+tri_out_a = tri_sig_a > 0 ? (1.0 - exp(-tri_sig_a)) : (tri_sig_a * 0.95); // Subtle clipping asymmetry
+ch_a = (ch_a * (1.0 - tri_amt)) + (tri_out_a * tri_amt);
+
+// 5. Post-Saturation Air Lift (12kHz Passive Shelf Simulation)
+slider8 == 1 ? (
+  air_out_a = ch_a + air_k * (ch_a - air_m);
+  air_m = air_out_a;
+  ch_a = (ch_a + air_out_a) * 0.5 * air_g;
+);
+
+
+// ==========================================
+// CHANNEL B PROCESSING LAYER (Side or Right)
+// ==========================================
+
+// 1. Parallel Saturation Path Isolation Filters
+sat_feed_b = ch_b;
+slider6 == 1 || slider6 == 2 ? (
+  p_s_lp1 += (sat_feed_b - p_s_lp1) * (2 * $pi * 250 / srate);
+  sat_feed_b = p_s_lp1;
+);
+slider6 == 3 || slider6 == 4 ? (
+  p_s_hp1 += (sat_feed_b - p_s_hp1) * (2 * $pi * 1000 / srate);
+  sat_feed_b -= p_s_hp1;
+);
+
+// 2. Parallel Tube Drive
+slider7 == 1 ? (
+  sat_out_b = sign(sat_feed_b) * (1.0 - exp(-abs(sat_feed_b * (1.0 + sat_amt * 4))));
+) : (
+  sat_out_b = sat_feed_b * (1.0 + sat_amt * 2) / (1.0 + abs(sat_feed_b * sat_amt));
+);
+ch_b += sat_out_b * sat_amt * 0.5;
+
+// 3. Main Pentode Core
+pent_sig_b = ch_b * (1.0 + pent_amt * 1.5);
+ch_b = (ch_b * (1.0 - pent_amt)) + (tan(min(1.5, max(-1.5, pent_sig_b))) * pent_amt);
+
+// 4. Main Triode Core
+tri_sig_b = ch_b * (1.0 + tri_amt * 1.2);
+tri_out_b = tri_sig_b > 0 ? (1.0 - exp(-tri_sig_b)) : (tri_sig_b * 0.95);
+ch_b = (ch_b * (1.0 - tri_amt)) + (tri_out_b * tri_amt);
+
+// 5. Post-Saturation Air Lift
+slider8 == 1 ? (
+  air_out_b = ch_b + air_k * (ch_b - air_s);
+  air_s = air_out_b;
+  ch_b = (ch_b + air_out_b) * 0.5 * air_g;
+);
+
+
+// ==========================================
+// STAGE 4: Output Decoding Reconstruction
+// ==========================================
+slider1 == 1 ? (
+  // Reconstruct M/S back into standard Left / Right audio outputs
+  spl0 = (ch_a + ch_b) * out_gain;
+  spl1 = (ch_a - ch_b) * out_gain;
+) : (
+  // Standard L/R passthrough mapping
+  spl0 = ch_a * out_gain;
+  spl1 = ch_b * out_gain;
+);
+
+
+// ==========================================
+// INDUSTRIAL BLACK BOX VISUAL INTERFACE
+// ==========================================
+@gfx 500 130
+
+// Backing Paint (Industrial Brushed Charcoal Texture)
+gfx_r = 0.08; gfx_g = 0.08; gfx_b = 0.09; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Core Glow Accent Bar (Subdued Blue Backlight matrix)
+gfx_set(0.05, 0.25, 0.6, 0.15);
+gfx_rect(20, 20, gfx_w - 40, 55, 1);
+
+// Draw separate dynamic digital level bars for Channel A and Channel B
+gfx_set(0.1, 0.45, 0.9, 0.85); // Glowing blue element paint
+
+// Channel A Bar Position Calculations
+val_a = abs(spl0);
+bar_w_a = min(gfx_w - 60, val_a * (gfx_w - 60));
+gfx_rect(30, 32, bar_w_a, 12, 1);
+
+// Channel B Bar Position Calculations
+val_b = abs(spl1);
+bar_w_b = min(gfx_w - 60, val_b * (gfx_w - 60));
+gfx_rect(30, 52, bar_w_b, 12, 1);
+
+// Text Overlays
+gfx_set(0.8, 0.8, 0.85, 0.9);
+gfx_x = 32; gfx_y = 92;
+slider1 == 1 ? (
+  gfx_drawstr("MASTER MODE: ACTIVE MID/SIDE ENCODED PROCESSING");
+) : (
+  gfx_drawstr("MASTER MODE: STANDARD STEREO DUAL-LINK LINKED LINK");
+);
+
+// Fine Boundary Borders
+gfx_set(0.25, 0.25, 0.27, 0.6);
+gfx_rect(20, 20, gfx_w - 40, 55, 0);

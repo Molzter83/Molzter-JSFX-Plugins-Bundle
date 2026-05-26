@@ -1,0 +1,82 @@
+desc: Molzter Drum Buss 
+author: Molzter
+version: 1.0
+
+slider1:0<0,100,1>Drive (%)
+slider2:0<0,2,1{Soft, Medium, Hard}>Drive Type
+slider3:0<-12,12,0.1>Trim (dB)
+slider4:0<0,1,1{Off, On}>Compressor
+slider5:0<0,100,1>Crunch / High Saturation (%)
+slider6:20000<5000,20000,100>Damp Frequency (Hz)
+slider7:0<-1,1,0.01>Transients (-1=Sustain, 1=Transient)
+slider8:0<0,100,1>Boom / Sub-Bass (%)
+slider9:50<30,90,0.1>Boom Frequency (Hz)
+slider10:50<0,100,1>Boom Decay (%)
+slider11:100<0,100,1>Dry / Wet Blend (%)
+
+@init
+b_damp_l = b_damp_r = 0; b_boom_x1 = b_boom_x2 = b_boom_y1 = b_boom_y2 = 0;
+b_boom_env = 0; comp_env = 1.0; old_sc_mono = trans_env_l = 0;
+
+@slider
+trim_amp = 10 ^ (slider3 / 20);
+drive_factor = 1.0 + (slider1 / 100) * 4.0;
+damp_coef = (2 * $pi * slider6 / srate) / (1.0 + (2 * $pi * slider6 / srate));
+
+c_atk_inv = 1.0 - exp(-1 / (srate * 0.002));
+c_rel_inv = 1.0 - exp(-1 / (srate * 0.120));
+t_atk_inv = 1.0 - exp(-1 / (srate * 0.0005));
+t_rel_inv = 1.0 - exp(-1 / (srate * 0.080));
+
+boom_w0 = 2 * $pi * slider9 / srate; boom_q = 2.0 + (slider10 / 100) * 18.0;
+boom_alpha = sin(boom_w0) / (2 * boom_q);
+b0 = boom_alpha / (1 + boom_alpha); b2 = -boom_alpha / (1 + boom_alpha);
+a1 = -2 * cos(boom_w0) / (1 + boom_alpha); a2 = (1 - boom_alpha) / (1 + boom_alpha);
+boom_gain = (slider8 / 100) * 0.35;
+
+@sample
+raw_l = spl0; raw_r = spl1;
+s0 = raw_l * trim_amp; s1 = raw_r * trim_amp;
+
+slider4 ? (
+  sc = (abs(s0) + abs(s1)) * 0.5;
+  c_target = sc > 0.18 ? (0.18 + ((sc - 0.18) * 0.25)) / sc : 1.0;
+  comp_env += (c_target - comp_env) * (c_target < comp_env ? c_atk_inv : c_rel_inv);
+  s0 *= comp_env * 1.45; s1 *= comp_env * 1.45;
+);
+
+s0_d = s0 * drive_factor; s1_d = s1 * drive_factor;
+
+// Logic split to ensure no undefined function calls
+slider2 == 0 ? (
+  s0 = (s0_d < 0 ? -1 : 1) * (1 - exp(-abs(s0_d))); 
+  s1 = (s1_d < 0 ? -1 : 1) * (1 - exp(-abs(s1_d)));
+) : slider2 == 1 ? (
+  // Using explicit formula instead of tanh() to bypass undefined function errors
+  s0 = (exp(s0_d) - exp(-s0_d)) / (exp(s0_d) + exp(-s0_d));
+  s1 = (exp(s1_d) - exp(-s1_d)) / (exp(s1_d) + exp(-s1_d));
+) : (
+  s0 = max(-0.85, min(0.85, s0_d * 0.9)); s1 = max(-0.85, min(0.85, s1_d * 0.9));
+);
+
+sc_mono = (abs(s0) + abs(s1)) * 0.5;
+trans_det = sc_mono - old_sc_mono; old_sc_mono = sc_mono;
+trans_env_l += (trans_det - trans_env_l) * (trans_det > trans_env_l ? t_atk_inv : t_rel_inv);
+trans_mod = (1.0 + (trans_env_l * slider7 * 2.0));
+s0 *= trans_mod; s1 *= trans_mod;
+
+b_damp_l += damp_coef * (s0 - b_damp_l); b_damp_r += damp_coef * (s1 - b_damp_r);
+crunch = (slider5 / 100) * 0.4;
+s0 += (s0 - b_damp_l) * crunch; s1 += (s1 - b_damp_r) * crunch;
+s0 = b_damp_l; s1 = b_damp_r;
+
+boom_in = (s0 + s1) * 0.5;
+boom_out = b0 * boom_in + b2 * b_boom_x2 - a1 * b_boom_y1 - a2 * b_boom_y2;
+b_boom_x2 = b_boom_x1; b_boom_x1 = boom_in;
+b_boom_y2 = b_boom_y1; b_boom_y1 = boom_out;
+b_boom_env += (abs(boom_in) - b_boom_env) * 0.05;
+boom_amt = boom_out * boom_gain * (b_boom_env * 3.0);
+s0 += boom_amt; s1 += boom_amt;
+
+spl0 = (s0 * (slider11/100)) + (raw_l * (1-(slider11/100)));
+spl1 = (s1 * (slider11/100)) + (raw_r * (1-(slider11/100)));

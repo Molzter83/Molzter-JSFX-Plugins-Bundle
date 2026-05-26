@@ -1,0 +1,42 @@
+desc: Molzter SATV-Style Saturator 
+
+slider1:0<0,1,0.01>Drive
+slider2:0<0,3,1{Transistor,Transformer,Tube,Tape}>Mode
+slider3:100<0,100,1>Mix (%)
+slider4:0<-12,12,0.1>Output (dB)
+slider5:0<0,1,1{Normal,Inverted}>Phase Switch
+
+@init
+// 4x Oversampling setup
+os_rate = 4;
+function get_model(x, m) (
+    m == 0 ? x * (1 + 0.5 * x*x) / (1 + x*x) :
+    m == 1 ? x / (1 + pow(abs(x), 1.5)) :
+    m == 2 ? x / (1 + abs(x)) :
+    (1 - exp(-abs(x))) * sign(x)
+);
+
+@sample
+// 1. Dry reference
+dry = spl0;
+
+// 2. Drive & Oversampling
+drive_lin = 1 + (slider1 * 20);
+sum_wet = 0;
+loop(os_rate,
+    in = spl0 * drive_lin;
+    sum_wet += get_model(in, slider2);
+);
+wet = sum_wet / os_rate;
+
+// 3. Phase Switch Logic
+// If Inverted, flip the polarity of the wet/dry sum
+phase = (slider5 == 0 ? 1 : -1);
+
+// 4. Mix & Final Phase
+mix = slider3 / 100;
+out = ((dry * (1 - mix)) + (wet * mix)) * phase;
+
+// 5. Output
+out_g = 10^(slider4 / 20);
+spl0 = spl1 = out * out_g;

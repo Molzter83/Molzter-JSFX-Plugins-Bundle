@@ -1,0 +1,90 @@
+desc: Molzter 76-Style Blue/Black FET Leveling Amplifier (Optimized)
+author: Molzter 
+version: 1.0
+
+slider1:30<0,60,0.1> Input Design Drive (Gain Reduction)
+slider2:30<0,60,0.1> Output Makeup Trim
+slider3:4<0,3,1{4:1, 8:1, 12:1, 20:1}> Compression Ratio
+slider4:5<1,7,0.1> Attack Speed (1=Slowest, 7=Fastest)
+slider5:5<1,7,0.1> Release Speed (1=Slowest, 7=Fastest)
+slider6:0<0,1,1{Gain Reduction, Input Level}> Meter Main View Mode
+slider7:0<0,1,1{Blackface Revision, Blue Stripe Class-A}> Chassis Revision Style
+
+@init
+env_l = -120.0;
+env_r = -120.0;
+meter_smooth = 0.0;
+// Inlining tanh for performance
+function fast_tanh(x) (
+  x > 20 ? 1 : (x < -20 ? -1 : (exp(2*x) - 1) / (exp(2*x) + 1))
+);
+
+@slider
+// Pre-calculate gain multipliers
+in_gain_multiplier = 10 ^ ((slider1 - 34.0) / 20);
+out_gain_multiplier = 10 ^ ((slider2 - 26.0) / 20);
+
+// Set ratios
+ratio_idx = floor(slider3);
+act_ratio = (ratio_idx == 0) ? 4.0 : (ratio_idx == 1) ? 8.0 : (ratio_idx == 2) ? 12.0 : 20.0;
+ratio_inv_minus_1 = (1.0 / act_ratio) - 1.0;
+
+// Pre-calculate timing
+att_ms = 0.8 - (slider4 - 1.0) * (0.78 / 6.0);
+rel_ms = 1100.0 - (slider5 - 1.0) * (1050.0 / 6.0);
+att_alpha = 1.0 - exp(-1.0 / (srate * (att_ms / 1000.0)));
+rel_alpha = 1.0 - exp(-1.0 / (srate * (rel_ms / 1000.0)));
+
+@sample
+// Stage 1: Input Drive
+s0_input = spl0 * in_gain_multiplier;
+s1_input = spl1 * in_gain_multiplier;
+
+// Stage 2: Optimized Detector (Log-domain compression)
+abs_s0 = abs(s0_input);
+s0_db = (abs_s0 > 0.00001) ? 20 * log10(abs_s0) : -120.0;
+abs_s1 = abs(s1_input);
+s1_db = (abs_s1 > 0.00001) ? 20 * log10(abs_s1) : -120.0;
+
+// Follow envelope
+env_l += (s0_db - env_l) * (s0_db > env_l ? att_alpha : rel_alpha);
+env_r += (s1_db - env_r) * (s1_db > env_r ? att_alpha : rel_alpha);
+
+fixed_threshold = -24.0;
+gr_db_l = (env_l > fixed_threshold) ? (env_l - fixed_threshold) * ratio_inv_minus_1 : 0.0;
+gr_db_r = (env_r > fixed_threshold) ? (env_r - fixed_threshold) * ratio_inv_minus_1 : 0.0;
+
+// Optimized linear conversion: 10^(x/20)
+gr_l = 10 ^ (gr_db_l * 0.05);
+gr_r = 10 ^ (gr_db_r * 0.05);
+
+// Stage 3: Output and Saturation
+s0_out = s0_input * gr_l * out_gain_multiplier;
+s1_out = s1_input * gr_r * out_gain_multiplier;
+
+sat_amt = (slider7 == 1) ? 1.45 : 1.15;
+spl0 = fast_tanh(s0_out * sat_amt) / sat_amt;
+spl1 = fast_tanh(s1_out * sat_amt) / sat_amt;
+
+// Metering
+meter_target = (slider6 == 0) ? (gr_db_l + gr_db_r) * 0.5 : 20 * log10(max(0.00001, (abs(spl0) + abs(spl1)) * 0.5));
+meter_smooth = (meter_smooth * 0.85) + (meter_target * 0.15);
+
+@gfx 620 270
+// (Original GUI code remains unchanged)
+slider7 == 1 ? (gfx_r = 0.64; gfx_g = 0.68; gfx_b = 0.74; gfx_a = 1.0;) : (gfx_r = 0.13; gfx_g = 0.14; gfx_b = 0.15; gfx_a = 1.0;);
+gfx_rect(0, 0, gfx_w, gfx_h);
+slider7 == 1 ? gfx_set(0.12, 0.25, 0.45, 0.25) : gfx_set(1, 1, 1, 0.08);
+gfx_rect(12, 12, gfx_w - 24, gfx_h - 24, 0);
+slider7 == 1 ? (gfx_set(0.15, 0.32, 0.58, 1.0); gfx_rect(15, 30, 290, 160, 1););
+m_w = 210; m_h = 105; m_x = gfx_w - m_w - 35; m_y = 35; needle_len = 82;
+gfx_set(0.05, 0.06, 0.07, 1.0); gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.96, 0.92, 0.82, 1.0); gfx_rect(m_x + 5, m_y + 5, m_w - 10, m_h - 10, 1);
+pivot_x = m_x + (m_w / 2); pivot_y = m_y + m_h - 10;
+slider6 == 0 ? (clamped_needle = min(20.0, abs(meter_smooth)); angle = -0.42 - (clamped_needle / 20.0) * 1.95; ) : (clamped_db = max(-40.0, min(0.0, meter_smooth)); norm_val = (clamped_db + 40.0) / 40.0; angle = -2.40 + (norm_val * 2.0); );
+tip_x = pivot_x + cos(angle) * needle_len; tip_y = pivot_y + sin(angle) * needle_len;
+gfx_set(0.10, 0.10, 0.12, 0.7); gfx_setfont(1, "Arial", 10, 'b');
+slider6 == 0 ? (gfx_x = m_x + 22; gfx_y = m_y + 50; gfx_drawstr("-20"); gfx_x = m_x + 55; gfx_y = m_y + 24; gfx_drawstr("-10"); gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("-5"); gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-2"); gfx_x = m_x + 180; gfx_y = m_y + 50; gfx_drawstr("0"); gfx_x = m_x + 15; gfx_y = m_y + 82; gfx_drawstr("CLA-76 ATTENUATE (dB)"); ) : ( gfx_x = m_x + 18; gfx_y = m_y + 50; gfx_drawstr("-40"); gfx_x = m_x + 52; gfx_y = m_y + 24; gfx_drawstr("-24"); gfx_x = m_x + 98; gfx_y = m_y + 14; gfx_drawstr("-12"); gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-6"); gfx_x = m_x + 182; gfx_y = m_y + 50; gfx_drawstr("0"); gfx_x = m_x + 15; gfx_y = m_y + 82; gfx_drawstr("CLA-76 INPUT LEVEL dBFS"); );
+gfx_set(0.05, 0.05, 0.06, 1.0); gfx_line(pivot_x, pivot_y, tip_x, tip_y, 1); gfx_line(pivot_x - 1, pivot_y, tip_x - 1, tip_y, 0);
+slider7 == 1 ? ( gfx_set(0.08, 0.15, 0.26, 0.4); gfx_rect(32, 35, 290, 140, 1); gfx_set(1.0, 1.0, 1.0, 0.95); ) : ( gfx_set(0.07, 0.08, 0.09, 0.55); gfx_rect(32, 35, 290, 140, 1); gfx_set(0.18, 0.20, 0.22, 0.4); gfx_rect(32, 35, 290, 140, 0); gfx_set(0.92, 0.94, 0.96, 0.9); );
+gfx_setfont(1, "Arial", 11, 'b'); gfx_x = 48; gfx_y = 50; gfx_drawstr(sprintf(#, "INPUT DESIGN DRIVE: %.1f", slider1)); gfx_x = 48; gfx_y = 76; gfx_drawstr(sprintf(#, "OUTPUT MAKEUP TRIM: %.1f", slider2)); gfx_x = 48; gfx_y = 102; gfx_drawstr(sprintf(#, "RATIO SELECTION:   %.0f : 1", act_ratio)); gfx_x = 48; gfx_y = 128; gfx_drawstr(sprintf(#, "ATTACK SETTING:    %.1f (Fast Profile)", slider4)); gfx_x = 48; gfx_y = 154; gfx_drawstr(sprintf(#, "RELEASE SETTING:   %.1f", slider5)); slider7 == 1 ? gfx_set(0.08, 0.18, 0.35, 0.9) : gfx_set(0.65, 0.68, 0.70, 0.85); gfx_setfont(1, "Impact", 16, 'i'); gfx_x = 48; gfx_y = 217; gfx_drawstr("MOLZTER CLA-76 FET"); gfx_setfont(1, "Arial", 11, 'b'); slider7 == 1 ? gfx_set(0.10, 0.15, 0.22, 0.85) : gfx_set(0.92, 0.94, 0.96, 0.9); gfx_x = gfx_w - 230; gfx_y = 219; slider7 == 1 ? gfx_drawstr("REVISION: BLUE-STRIPE CLASS-A") : gfx_drawstr("REVISION: BLACKFACE LN-SERIES");

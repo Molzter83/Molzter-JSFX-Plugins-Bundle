@@ -1,0 +1,32 @@
+desc: Molzter M-A-S Style Peak Bender 
+
+slider1:0.5<0,1,0.01>Drive 
+slider2:0.5<0,1,0.01>Emphasis
+slider3:100<0,100,1>Mix (%)
+slider4:0<0,1,1{Off,On}>Dual Mode
+slider5:0<-12,12,0.1>Output (dB)
+
+@init
+function bend_peaks(x) (
+    // Harder threshold to ensure you hear the "bend"
+    x / (1 + pow(abs(x), 2.0)) 
+);
+
+@sample
+// 1. Input Stage: Increased gain boost so it hits the saturator hard
+in = spl0 * (1 + (slider1 * 20));
+
+// 2. Emphasis Logic
+emphasis = in * (1 + (slider2 * 3.0));
+
+// 3. Peak Bending
+stage1 = bend_peaks(emphasis);
+wet = (slider4 == 1) ? bend_peaks(stage1) : stage1;
+
+// 4. Mix & Output
+mix = slider3 / 100;
+out = ((spl0 * (1 - mix)) + (wet * mix));
+
+// 5. Output
+out_g = 10^(slider5 / 20);
+spl0 = spl1 = out * out_g;

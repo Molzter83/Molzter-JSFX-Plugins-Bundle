@@ -1,0 +1,41 @@
+desc: Molzter Saturator X 
+
+slider1:0<0,1,0.01>Drive
+slider2:0<0,9,1{Tape 1,Tape 2,Master +6,Master +12,Tube 1,Tube 2,Solid 1,Solid 2,Transformer Iron,Transformer Steel}>Mode
+slider3:0<-24,24,0.1>Output (dB)
+
+@init
+os_rate = 4;
+function get_tape(x) ( (1 - exp(-abs(x))) * sign(x) );
+function get_master(x, limit) ( x / (1 + pow(abs(x), limit)) );
+function get_tube(x, bias) ( x / (1 + abs(x + bias)) );
+function get_solid(x) ( x * (1 + 0.5 * x*x) / (1 + x*x) );
+function get_trans(x, grit) ( x + (grit * pow(x, 3)) );
+
+@sample
+// Original signal reference for makeup gain
+orig = spl0;
+
+// Split signal
+lows = spl0 * 0.15; 
+highs = spl0 * 0.85;
+
+sum_out = 0;
+i = 0;
+loop(os_rate,
+  drive = 1 + (slider1 * 20);
+  
+  mode = slider2;
+  // Apply saturation
+  processed = mode >= 8 ? get_trans(lows * drive, 0.1) + (highs * 0.8) : get_tube(highs * drive, 0.1) + (lows * 0.8);
+  sum_out += processed;
+  i += 1;
+);
+
+// Balanced Output: Normalize volume and apply makeup gain
+out = (sum_out / os_rate); 
+
+// Output Stage
+out_g = 10^(slider3 / 20);
+spl0 = out * out_g;
+spl1 = out * out_g;

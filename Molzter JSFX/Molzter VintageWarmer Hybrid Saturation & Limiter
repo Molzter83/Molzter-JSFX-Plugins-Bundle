@@ -1,0 +1,78 @@
+desc: Molzter VintageWarmer Hybrid Saturation & Limiter
+
+slider1:0<-20,24,0.1> Drive Input (dB)
+slider2:0<-12,12,0.1> Low Frequency Adjust (dB)
+slider3:0<-12,12,0.1> High Frequency Adjust (dB)
+slider4:50<0,100,1> Saturation Knee Fatness (%)
+slider5:0<-20,0,0.1> Brickwall Ceiling (dB)
+slider6:100<0,100,1> Parallel Blend Mix (%)
+slider7:0<-12,12,0.1> Main Output (dB)
+
+@init
+gr_smooth = 0;
+
+@slider
+drive_gain = 10 ^ (slider1 / 20);
+out_gain = 10 ^ (slider7 / 20);
+ceil_level = 10 ^ (slider5 / 20);
+mix_wet = slider6 / 100; mix_dry = 1.0 - mix_wet;
+knee_val = 1.0 + (slider4 / 100 * 2.0);
+
+@sample
+s0_dry = spl0; s1_dry = spl1;
+in_l = spl0 * drive_gain;
+in_r = spl1 * drive_gain;
+
+// Stable saturation without 'tanh' dependency
+val_l = min(max(in_l * knee_val, -10), 10);
+val_r = min(max(in_r * knee_val, -10), 10);
+exp_l = exp(val_l); exp_neg_l = exp(-val_l);
+exp_r = exp(val_r); exp_neg_r = exp(-val_r);
+out_l = (exp_l - exp_neg_l) / (exp_l + exp_neg_l);
+out_r = (exp_r - exp_neg_r) / (exp_r + exp_neg_r);
+
+// Brickwall Limiter
+out_l = max(min(out_l, ceil_level), -ceil_level);
+out_r = max(min(out_r, ceil_level), -ceil_level);
+
+// Metering
+diff_l = 20 * log10(max(0.001, abs(in_l + 0.00001))) - 20 * log10(max(0.001, abs(out_l + 0.00001)));
+diff_r = 20 * log10(max(0.001, abs(in_r + 0.00001))) - 20 * log10(max(0.001, abs(out_r + 0.00001)));
+gr_smooth += ((diff_l + diff_r) * 0.5 - gr_smooth) * 0.05;
+
+// Final Output
+spl0 = (out_l * mix_wet + s0_dry * mix_dry) * out_gain;
+spl1 = (out_r * mix_wet + s1_dry * mix_dry) * out_gain;
+
+@gfx 600 300
+gfx_r = 0.82; gfx_g = 0.83;
+gfx_b = 0.85; gfx_a = 1.0; gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Meter Setup
+m_w = 300; m_h = 120;
+needle_len = 90;
+m_x = (gfx_w - m_w) / 2; m_y = 30;
+gfx_set(0.12, 0.13, 0.14, 1.0);
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+gfx_set(0.96, 0.94, 0.84, 1.0); gfx_rect(m_x + 4, m_y + 4, m_w - 8, m_h - 8, 1);
+
+// dB Scale Labels
+gfx_set(0.2, 0.2, 0.2, 1.0);
+gfx_x = m_x + 20; gfx_y = m_y + 80; gfx_drawstr("20");
+gfx_x = m_x + 135; gfx_y = m_y + 15; gfx_drawstr("10");
+gfx_x = m_x + 250;
+gfx_y = m_y + 80; gfx_drawstr("0");
+
+// Needle Logic
+angle = -0.35 + (min(20, gr_smooth) / 20) * 2.3;
+pivot_x = m_x + (m_w / 2); pivot_y = m_y + m_h - 10;
+gfx_set(0.08, 0.09, 0.10, 1.0);
+gfx_line(pivot_x, pivot_y, pivot_x + cos(angle) * needle_len, pivot_y + sin(angle) * needle_len, 1);
+
+gfx_set(0.12, 0.14, 0.16, 0.85);
+gfx_x = 50;
+gfx_y = 200; gfx_drawstr(sprintf(#, "DRIVE: %.1f dB", slider1));
+gfx_x = 50; gfx_y = 230; gfx_drawstr(sprintf(#, "KNEE: %d %%", slider4));
+gfx_x = 350; gfx_y = 200; gfx_drawstr(sprintf(#, "LOW: %.1f dB", slider2));
+gfx_x = 350; gfx_y = 230;
+gfx_drawstr(sprintf(#, "HIGH: %.1f dB", slider3));

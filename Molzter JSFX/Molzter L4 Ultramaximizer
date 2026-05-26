@@ -1,0 +1,116 @@
+desc: Molzter L4 Ultramaximizer
+author: Molzter
+version: 1
+
+slider1:0<-18,0,0.1>Threshold (dB)
+slider2:-0.1<-3,0,0.01>Ceiling (dB)
+slider3:0<0,4,1{Modern, Aggressive, Smooth, Safe, Classic L2}>Algorithm Profile
+slider4:10<0.1,100,0.5>Release Time (ms)
+slider5:0<0,12,0.1>Upward Leveler (dB)
+slider6:1<0,1,1{Off, On}>Adaptive Clipper
+
+@init
+// Clean memory allocations for independent left and right channels
+buf_size = 44100 * 0.05; // 50ms buffer limit
+buf_l = 0;               
+buf_r = buf_size + 10;   
+buf_pos = 0;
+
+// Internal tracking envelopes
+peak_env = 0.0;
+upward_env = 0.0;
+
+// Custom compiled function to replace the missing native tanh()
+function math_tanh(x) local(e2x) (
+  e2x = exp(2 * x);
+  (e2x - 1) / (e2x + 1);
+);
+
+@slider
+thresh_amp = 10 ^ (slider1 / 20);
+ceil_amp = 10 ^ (slider2 / 20);
+algo = slider3;
+user_release = slider4 / 1000; 
+upward_gain_target = 10 ^ (slider5 / 20);
+clipper_active = slider6;
+
+// Adjust delay window boundaries and envelope coefficients per algorithm profile
+algo == 0 ? ( 
+  delay_samples = floor(srate * 0.0015); 
+  atk_coef = exp(-1 / (srate * 0.00005));
+  rel_coef = exp(-1 / (srate * user_release * 0.8));
+) : algo == 1 ? ( 
+  delay_samples = floor(srate * 0.0008); 
+  atk_coef = exp(-1 / (srate * 0.00001));
+  rel_coef = exp(-1 / (srate * user_release * 0.4));
+) : algo == 2 ? ( 
+  delay_samples = floor(srate * 0.0025); 
+  atk_coef = exp(-1 / (srate * 0.0005));
+  rel_coef = exp(-1 / (srate * user_release * 1.5));
+) : algo == 3 ? ( 
+  delay_samples = floor(srate * 0.0020);
+  atk_coef = exp(-1 / (srate * 0.0001));
+  rel_coef = exp(-1 / (srate * user_release * 2.0));
+) : ( 
+  delay_samples = floor(srate * 0.0010);
+  atk_coef = 0.0; 
+  rel_coef = exp(-1 / (srate * user_release));
+);
+
+delay_samples = max(1, min(delay_samples, buf_size - 1));
+makeup_gain = 1.0 / thresh_amp;
+
+@sample
+// STEP 1: Feed look-ahead detector live
+s0_det = spl0 * makeup_gain;
+s1_det = spl1 * makeup_gain;
+peak_input = max(abs(s0_det), abs(s1_det));
+
+// STEP 2: Smooth look-ahead tracking envelope
+peak_env = peak_input > peak_env ? 
+  (peak_env * atk_coef) + (peak_input * (1.0 - atk_coef)) : 
+  (peak_env * rel_coef) + (peak_input * (1.0 - rel_coef));
+
+gr = peak_env > 1.0 ? 1.0 / peak_env : 1.0;
+
+// STEP 3: Load real-time audio samples into ring memory space
+buf_l[buf_pos] = spl0;
+buf_r[buf_pos] = spl1;
+
+// STEP 4: Calculate the offset to draw delayed audio values
+play_pos = buf_pos - delay_samples;
+play_pos < 0 ? play_pos += delay_samples + 1; 
+
+s0 = buf_l[play_pos] * makeup_gain * gr;
+s1 = buf_r[play_pos] * makeup_gain * gr;
+
+// STEP 5: Upward Leveler processing loop
+upward_det = max(abs(s0), abs(s1));
+upward_env = (upward_env * exp(-1 / (srate * 0.150))) + (upward_det * (1.0 - exp(-1 / (srate * 0.150))));
+
+upward_env < 0.316 ? (
+  lift_scale = (0.316 - upward_env) / 0.316;
+  upward_mult = 1.0 + ((upward_gain_target - 1.0) * lift_scale);
+  s0 *= upward_mult;
+  s1 *= upward_mult;
+);
+
+// STEP 6: Adaptive Soft Clipper Stage using our manual math_tanh function
+clipper_active ? (
+  clip_threshold = 0.95; 
+  
+  abs(s0) > clip_threshold ? (
+    s0 = sign(s0) * (clip_threshold + (1.0 - clip_threshold) * math_tanh((abs(s0) - clip_threshold) / (1.0 - clip_threshold)));
+  );
+  abs(s1) > clip_threshold ? (
+    s1 = sign(s1) * (clip_threshold + (1.0 - clip_threshold) * math_tanh((abs(s1) - clip_threshold) / (1.0 - clip_threshold)));
+  );
+);
+
+// STEP 7: Master output ceiling mapping and hard safety clamp
+spl0 = max(-ceil_amp, min(ceil_amp, s0 * ceil_amp));
+spl1 = max(-ceil_amp, min(ceil_amp, s1 * ceil_amp));
+
+// Advance index boundaries
+buf_pos += 1;
+buf_pos >= delay_samples + 1 ? buf_pos = 0;

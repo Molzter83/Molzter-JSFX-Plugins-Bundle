@@ -1,0 +1,267 @@
+desc: Molzter MK-609 Diode-Bridge Masterpiece
+author: Molzter
+version: 1.0
+
+slider1:0<0,1,1{Unlinked Mono/Stereo, Stereo Linked}> Stereo Link
+slider2:0<0,2,1{Off, 50 Hz, 100 Hz}> Sidechain HPF Filter
+
+slider4:4<0,5,1{12, 10, 8, 6, 4, 2}> Limit Threshold (dBu)
+slider5:1<0,2,1{Slow, Fast, Super Fast}> Limit Attack
+slider6:1<0,3,1{50ms, 100ms, 200ms, 600ms}> Limit Recovery (Release)
+
+slider8:0<-20,10,0.5> Comp Threshold (dBu)
+slider9:2<0,5,1{1.5:1, 2:1, 3:1, 4:1, 6:1, More}> Comp Ratio
+slider10:1<0,2,1{Slow, Fast, Super Fast}> Comp Attack
+slider11:1<0,5,1{100ms, 400ms, 800ms, 1500ms, Auto 1, Auto 2}> Comp Recovery
+slider12:0<0,20,0.1> Compressor Makeup Gain (dB)
+
+@init
+// Sidechain HPF filter state storage variables
+sc_hp_l1 = sc_hp_l2 = sc_hp_r1 = sc_hp_r2 = 0;
+
+// Dual-stage envelope memory tracking states
+env_lim_l = env_lim_r = 0.0;
+env_comp_l = env_comp_r = 0.0;
+
+// Meter ballistics smoothing filter parameters
+meter_lim_smooth = 0.0;
+meter_comp_smooth = 0.0;
+
+@slider
+// Reference operational calibration level mapping digital dBFS to analog dBu scale
+// 0 dBFS translates strictly down to +18 dBu inside our virtual gain stage matrix
+dbu_offset = 18.0;
+
+// --- LIMITER PARAMS CONFIGURATION ---
+slider4 == 0 ? lim_th = 12 : slider4 == 1 ? lim_th = 10 : slider4 == 2 ? lim_th = 8 : 
+slider4 == 3 ? lim_th = 6  : slider4 == 4 ? lim_th = 4  : lim_th = 2;
+lim_th_dbfs = lim_th - dbu_offset;
+
+// AudioScape Super Fast Modification implementation for Limiter
+slider5 == 0 ? lim_atk_ms = 5.0 : slider5 == 1 ? lim_atk_ms = 0.5 : lim_atk_ms = 0.05;
+
+slider6 == 0 ? lim_rel_ms = 50 : slider6 == 1 ? lim_rel_ms = 100 : 
+slider6 == 2 ? lim_rel_ms = 200 : lim_rel_ms = 600;
+
+// --- COMPRESSOR PARAMS CONFIGURATION ---
+comp_th_dbfs = slider8 - dbu_offset;
+
+slider9 == 0 ? comp_ratio = 1.5 : slider9 == 1 ? comp_ratio = 2.0 : 
+slider9 == 2 ? comp_ratio = 3.0   : slider9 == 3 ? comp_ratio = 4.0 : 
+slider9 == 4 ? comp_ratio = 6.0   : comp_ratio = 10.0;
+
+// AudioScape Super Fast Modification implementation for Compressor
+slider10 == 0 ? comp_atk_ms = 25.0 : slider10 == 1 ? comp_atk_ms = 4.0 : comp_atk_ms = 0.3;
+
+auto_mode = 0;
+slider11 == 0 ? comp_rel_ms = 100 : slider11 == 1 ? comp_rel_ms = 400 :
+slider11 == 2 ? comp_rel_ms = 800 : slider11 == 3 ? comp_rel_ms = 1500 : (
+  comp_rel_ms = 250; auto_mode = slider11 - 3; // Flags for native Auto tracking modes
+);
+
+comp_makeup = 10 ^ (slider12 / 20);
+
+@sample
+s_l = spl0;
+s_r = spl1;
+
+// STAGE 1: Isolated Sidechain Filtering Path
+sc_l = s_l;
+sc_r = s_r;
+
+slider2 > 0 ? (
+  f_cut = slider2 == 1 ? 50 : 100;
+  rc_val = 1.0 / (2 * $pi * f_cut);
+  hp_alpha = rc_val / (rc_val + (1.0 / srate));
+  
+  sc_l = hp_alpha * (sc_l - sc_hp_l1) + sc_hp_l2;
+  sc_hp_l1 = spl0; sc_hp_l2 = sc_l;
+  
+  sc_r = hp_alpha * (sc_r - sc_hp_r1) + sc_hp_r2;
+  sc_hp_r1 = spl1; sc_hp_r2 = sc_r;
+);
+
+// Process independent Mono channels or cross-link paths for absolute Stereo center imaging
+slider1 == 1 ? (
+  sc_linked = max(abs(sc_l), abs(sc_r));
+  sc_l_det = sc_linked;
+  sc_r_det = sc_linked;
+) : (
+  sc_l_det = abs(sc_l);
+  sc_r_det = abs(sc_r);
+);
+
+
+// ==========================================
+// DUAL DYNAMICS SYSTEM: CHANNEL L
+// ==========================================
+
+// 1. LIMITER SECTION (First stage of the hardware loop)
+sc_l_db = 20 * log10(max(0.000001, sc_l_det));
+target_lim_gr_l = 0.0;
+sc_l_db > lim_th_dbfs ? (
+  target_lim_gr_l = sc_l_db - lim_th_dbfs;
+);
+
+// Map time constants out to sample-rate space coefficients
+lim_atk_coef = exp(-1.0 / (srate * (lim_atk_ms / 1000.0)));
+lim_rel_coef = exp(-1.0 / (srate * (lim_rel_ms / 1000.0)));
+
+target_lim_gr_l > env_lim_l ? (
+  env_lim_l = (env_lim_l * lim_atk_coef) + (target_lim_gr_l * (1.0 - lim_atk_coef));
+) : (
+  env_lim_l = (env_lim_l * lim_rel_coef) + (target_lim_gr_l * (1.0 - lim_rel_coef));
+);
+
+lim_gain_l = 10 ^ (-env_lim_l / 20);
+s_l *= lim_gain_l;
+
+// 2. DIODE COMPRESSOR SECTION (Second stage feedback path)
+// Non-linear diode bridge emulation curve modeling (Smooth progressive soft knee curvature)
+comp_target_gr_l = 0.0;
+sc_l_db > comp_th_dbfs ? (
+  // Soft progressive bend toward the classic discrete Neve transfer curves
+  comp_target_gr_l = (sc_l_db - comp_th_dbfs) * (1.0 - (1.0 / comp_ratio));
+);
+
+// Multi-stage variable program timing integration curves for Auto 1 & Auto 2 modes
+actual_comp_rel_l = comp_rel_ms;
+auto_mode == 1 ? ( // Auto 1: Quick burst recovery settling into an organic linear decay tail
+  actual_comp_rel_l = env_comp_l > 4.0 ? 800.0 : 80.0;
+) : auto_mode == 2 ? ( // Auto 2: Ultra-slow long term structural leveling ballistics
+  actual_comp_rel_l = env_comp_l > 6.0 ? 1500.0 : 250.0;
+);
+
+comp_atk_coef = exp(-1.0 / (srate * (comp_atk_ms / 1000.0)));
+comp_rel_coef = exp(-1.0 / (srate * (actual_comp_rel_l / 1000.0)));
+
+comp_target_gr_l > env_comp_l ? (
+  env_comp_l = (env_comp_l * comp_atk_coef) + (comp_target_gr_l * (1.0 - comp_atk_coef));
+) : (
+  env_comp_l = (env_comp_l * comp_rel_coef) + (comp_target_gr_l * (1.0 - comp_rel_coef));
+);
+
+comp_gain_l = 10 ^ (-env_comp_l / 20);
+s_l *= (comp_gain_l * comp_makeup);
+
+
+// ==========================================
+// DUAL DYNAMICS SYSTEM: CHANNEL R
+// ==========================================
+
+// 1. LIMITER SECTION
+sc_r_db = 20 * log10(max(0.000001, sc_r_det));
+target_lim_gr_r = 0.0;
+sc_r_db > lim_th_dbfs ? (
+  target_lim_gr_r = sc_r_db - lim_th_dbfs;
+);
+
+target_lim_gr_r > env_lim_r ? (
+  env_lim_r = (env_lim_r * lim_atk_coef) + (target_lim_gr_r * (1.0 - lim_atk_coef));
+) : (
+  env_lim_r = (env_lim_r * lim_rel_coef) + (target_lim_gr_r * (1.0 - lim_rel_coef));
+);
+
+lim_gain_r = 10 ^ (-env_lim_r / 20);
+s_r *= lim_gain_r;
+
+// 2. DIODE COMPRESSOR SECTION
+comp_target_gr_r = 0.0;
+sc_r_db > comp_th_dbfs ? (
+  comp_target_gr_r = (sc_r_db - comp_th_dbfs) * (1.0 - (1.0 / comp_ratio));
+);
+
+auto_mode == 1 ? (
+  actual_comp_rel_r = env_comp_r > 4.0 ? 800.0 : 80.0;
+) : auto_mode == 2 ? (
+  actual_comp_rel_r = env_comp_r > 6.0 ? 1500.0 : 250.0;
+) : (
+  actual_comp_rel_r = comp_rel_ms;
+);
+
+comp_rel_coef_r = exp(-1.0 / (srate * (actual_comp_rel_r / 1000.0)));
+
+comp_target_gr_r > env_comp_r ? (
+  env_comp_r = (env_comp_r * comp_atk_coef) + (comp_target_gr_r * (1.0 - comp_atk_coef));
+) : (
+  env_comp_r = (env_comp_r * comp_rel_coef_r) + (comp_target_gr_r * (1.0 - comp_rel_coef_r));
+);
+
+comp_gain_r = 10 ^ (-env_comp_r / 20);
+s_r *= (comp_gain_r * comp_makeup);
+
+// Output tracking assignments
+spl0 = s_l;
+spl1 = s_r;
+
+
+// ==========================================
+// VINTAGE BRITISH DUAL VU METER LAYOUT
+// ==========================================
+@gfx 500 140
+
+// Solid Royal RAF Navy Charcoal faceplate paint backing
+gfx_r = 0.16; gfx_g = 0.18; gfx_b = 0.19; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Compute combined stereo or maximum active gain attenuation metrics
+total_lim_gr = max(env_lim_l, env_lim_r);
+total_comp_gr = max(env_comp_l, env_comp_r);
+
+// Emulate mechanical physical needle ballistic responses 
+meter_lim_smooth = (meter_lim_smooth * 0.94) + (total_lim_gr * 0.06);
+meter_comp_smooth = (meter_comp_smooth * 0.90) + (total_comp_gr * 0.10);
+
+// --- DRAW LEFT GRAPHICS PANEL (LIMITER GAIN REDUCTION) ---
+l_x = 25; l_y = 25; l_w = (gfx_w / 2) - 35; l_h = 60;
+gfx_set(0.08, 0.09, 0.10, 1.0); // Inside meter window
+gfx_rect(l_x, l_y, l_w, l_h, 1);
+gfx_set(0.45, 0.45, 0.45, 1.0); // Bounding case frame lines
+gfx_rect(l_x, l_y, l_w, l_h, 0);
+
+// Draw needle line for Limiter
+lim_norm = min(1.0, max(0.0, meter_lim_smooth / 12.0));
+lim_needle_x = l_x + (lim_norm * l_w);
+gfx_set(1.0, 0.25, 0.2, 0.9); // Crimson red vintage needles
+gfx_line(lim_needle_x, l_y + 2, lim_needle_x, l_y + l_h - 2, 2);
+
+// Labels left panel
+gfx_set(0.85, 0.85, 0.9, 1.0);
+gfx_x = l_x + 6; gfx_y = l_y + 6;
+gfx_drawstr("LIMIT GR");
+gfx_x = l_x + 6; gfx_y = l_y + l_h - 18;
+gfx_drawnumber(total_lim_gr, 1);
+gfx_drawstr(" dB");
+
+
+// --- DRAW RIGHT GRAPHICS PANEL (COMPRESSOR GAIN REDUCTION) ---
+r_x = (gfx_w / 2) + 10; r_y = 25; r_w = l_w; r_h = 60;
+gfx_set(0.08, 0.09, 0.10, 1.0);
+gfx_rect(r_x, r_y, r_w, r_h, 1);
+gfx_set(0.45, 0.45, 0.45, 1.0);
+gfx_rect(r_x, r_y, r_w, r_h, 0);
+
+// Draw needle line for Compressor
+comp_norm = min(1.0, max(0.0, meter_comp_smooth / 20.0));
+comp_needle_x = r_x + (comp_norm * r_w);
+gfx_set(1.0, 0.25, 0.2, 0.9);
+gfx_line(comp_needle_x, r_y + 2, comp_needle_x, r_y + r_h - 2, 2);
+
+// Labels right panel
+gfx_set(0.85, 0.85, 0.9, 1.0);
+gfx_x = r_x + 6; gfx_y = r_y + 6;
+gfx_drawstr("COMP GR");
+gfx_x = r_x + 6; gfx_y = r_y + r_h - 18;
+gfx_drawnumber(total_comp_gr, 1);
+gfx_drawstr(" dB");
+
+
+// FOOTER CAPTION STRIPS
+gfx_set(0.75, 0.75, 0.75, 0.85);
+gfx_x = 28; gfx_y = 105;
+gfx_drawstr("MK-609 MODEL");
+
+gfx_x = gfx_w - 170; gfx_y = 105;
+slider2 == 0 ? gfx_drawstr("SC-FILTER: BYPASSED") :
+slider2 == 1 ? gfx_drawstr("SC-FILTER: 50 Hz HPF") :
+               gfx_drawstr("SC-FILTER: 100 Hz HPF");

@@ -1,0 +1,58 @@
+desc: Molzter Harmonics Pro
+
+slider1:0<0,1,0.01>Drive
+slider2:0.5<0,1,0.01>Character
+slider3:0.5<0,1,0.01>Dynamics (DTC)
+slider4:0<0,4,1{Solid,Transformer,Master,Tube,Modern}>Style
+slider5:0.5<0,1,0.01>Mix
+slider6:0<-24,24,0.1>Input Gain (dB)
+slider7:0<-24,24,0.1>Output Gain (dB)
+
+@init
+function fast_tanh(x) local(ex, emx) (
+    ex = exp(x); emx = exp(-x);
+    (ex - emx) / (ex + emx);
+);
+// Envelope follower for dynamics
+env_l = 0; env_r = 0;
+
+@sample
+// 1. Input Gain
+in_gain = 10^(slider6 / 20);
+sig_in_l = spl0 * in_gain;
+sig_in_r = spl1 * in_gain;
+
+// 2. Dynamics Analysis (Envelope follower)
+// Smoothing constant (0.05) provides natural transient response
+env_l += (abs(sig_in_l) - env_l) * 0.05;
+env_r += (abs(sig_in_r) - env_r) * 0.05;
+
+// 3. Distortion Engine
+// Drive scaling
+drive = 1 + (slider1 * 15);
+
+// Style-specific transfer functions
+function get_dist(in, char, style) (
+    in *= drive;
+    style == 0 ? fast_tanh(in) :
+    style == 1 ? in / (1 + abs(in)) :
+    style == 2 ? in - (pow(in, 3) * 0.15) :
+    style == 3 ? fast_tanh(in * 1.5) / 1.5 : 
+    sin(in * (1 + char))
+);
+
+dist_l = get_dist(sig_in_l, slider2, slider4);
+dist_r = get_dist(sig_in_r, slider2, slider4);
+
+// 4. Dynamic Transient Control (DTC)
+// Attenuates processed signal based on input envelope to maintain punch
+final_l = dist_l * (1.0 - (slider3 * env_l));
+final_r = dist_r * (1.0 - (slider3 * env_r));
+
+// 5. Output Stage & Mix
+out_g = 10^(slider7 / 20);
+final_l *= out_g;
+final_r *= out_g;
+
+spl0 = (spl0 * (1 - slider5)) + (final_l * slider5);
+spl1 = (spl1 * (1 - slider5)) + (final_r * slider5);

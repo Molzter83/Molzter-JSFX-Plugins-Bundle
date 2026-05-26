@@ -1,0 +1,49 @@
+desc: Molzter A800 Multitrack Tape Engine 
+author: Molzter
+version: 1.0
+
+slider1:0<-12,24,0.1> Input Record Level (dB)
+slider2:0<0,1,1{15 ips (Warm low-end), 30 ips (Hi-Fi Clean)}> Tape Speed Select
+slider3:0<0,1,1{NAB (Standard), CCIR (European Master)}> EQ Curve Standard
+slider4:0<-3,3,0.1> Tape Bias Calibration (dB)
+slider5:100<0,100,1> Tape HF Output Alignment (%)
+slider6:0<-12,12,0.1> Output Reproduce Level (dB)
+
+@init
+function soft_clip(in, limit) (
+  abs(in) > limit ? sign(in) * (limit + (abs(in) - limit) / (1 + (abs(in) - limit) / limit)) : in;
+);
+trans_l = trans_r = gap_l = gap_r = 0.0;
+
+@slider
+rec_gain = 10 ^ (slider1 / 20);
+rep_gain = 10 ^ (slider6 / 20);
+hf_align = slider5 / 100;
+bias_factor = 1.0 + (slider4 * 0.12);
+sat_ceiling = (slider2 == 0) ? 0.90 : 1.25;
+
+@sample
+// Stage 1: Input Transformer
+trans_l += (spl0 * rec_gain - trans_l) * 0.15;
+trans_r += (spl1 * rec_gain - trans_r) * 0.15;
+in_l = trans_l + (spl0 * rec_gain - trans_l) * 0.25;
+in_r = trans_r + (spl1 * rec_gain - trans_r) * 0.25;
+
+// Stage 2: EQ Emphasis
+eq_mult = (slider2 == 0) ? ((slider3 == 0) ? 1.35 : 1.15) : 1.05;
+in_l *= eq_mult; in_r *= eq_mult;
+
+// Stage 3: Hysteresis-Modeled Tape Saturation (Soft-Knee)
+abs_l = abs(in_l); abs_r = abs(in_r);
+sat_l = abs_l > sat_ceiling ? sign(in_l) * (sat_ceiling + (abs_l - sat_ceiling)/(1 + (abs_l - sat_ceiling)/sat_ceiling)) : sign(in_l) * (1.0 - exp(-abs_l * bias_factor / sat_ceiling)) * sat_ceiling;
+sat_r = abs_r > sat_ceiling ? sign(in_r) * (sat_ceiling + (abs_r - sat_ceiling)/(1 + (abs_r - sat_ceiling)/sat_ceiling)) : sign(in_r) * (1.0 - exp(-abs_r * bias_factor / sat_ceiling)) * sat_ceiling;
+
+// Stage 4: Reproduce Gap Compensation
+gap_l += (sat_l - gap_l) * 0.45;
+gap_r += (sat_r - gap_r) * 0.45;
+out_l = sat_l + (sat_l - gap_l) * hf_align * 0.45;
+out_r = sat_r + (sat_r - gap_r) * hf_align * 0.45;
+
+// Stage 5: Final Output
+spl0 = soft_clip(out_l * rep_gain, 1.0);
+spl1 = soft_clip(out_r * rep_gain, 1.0);

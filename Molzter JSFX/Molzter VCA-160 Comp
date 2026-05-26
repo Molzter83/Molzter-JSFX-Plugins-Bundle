@@ -1,0 +1,261 @@
+desc: Molzter VCA-160 Character Compressor 
+author: Molzter 
+version: 1.0
+
+slider1:0<-40,20,0.1> Compression Threshold (dB)
+slider2:4.0<1.0,20.0,0.1> Compression Ratio (:1)
+slider3:0<-10,30,0.1> Output Gain Level (dB)
+slider4:0<0,100,1> Output Drive Saturation (%)
+slider5:0<0,200,1> Sidechain High-Pass Filter (Hz)
+slider6:0<0,1,1{Off, On}> High-Frequency Make-Up Sheen
+slider7:100<0,100,1> Dry / Wet Parallel Mix (%)
+slider8:1<0,1,1{Unlinked Dual Mono, Linked Stereo}> Detector Channel Link
+slider9:0<0,1,1{Gain Reduction, Input Level}> Meter Display Target View
+slider10:1.0<0.2,5.0,0.1> Attack Time Multiplier (x)
+slider11:1.0<0.2,5.0,0.1> Release Time Multiplier (x)
+
+@init
+// RMS Integration Buffers
+rms_window_ms = 30.0;
+rms_samples = max(1, floor(srate * (rms_window_ms / 1000.0)));
+rms_coeff = 1.0 - exp(-1.0 / rms_samples);
+
+rms_sq_l = 0.0;
+rms_sq_r = 0.0;
+meter_smooth = 0.0;
+
+// Program dependent tracking parameters
+env_gr_l = 0.0;
+env_gr_r = 0.0;
+
+// Sidechain filter coefficient memories
+sc_hp_l_1 = sc_hp_l_2 = 0.0;
+sc_hp_r_1 = sc_hp_r_2 = 0.0;
+
+// HF Make-Up Filter State History
+hf_prev_l = 0.0;
+hf_prev_r = 0.0;
+
+// Native solid-state circuit wave-shaper
+function tanh(x) (
+  x > 20 ? 1 : (x < -20 ? -1 : (exp(2*x) - 1) / (exp(2*x) + 1))
+);
+
+@slider
+thresh_db = slider1;
+ratio_val = slider2;
+out_gain = 10 ^ (slider3 / 20);
+drive_amt = slider4 / 100.0;
+dry_mix = (100.0 - slider7) / 100.0;
+wet_mix = slider7 / 100.0;
+
+// Cache multipliers (Inverted so higher values = longer/slower times, lower values = faster)
+att_mult = slider10;
+rel_mult = slider11;
+
+// Calculate 1-Pole High-Pass sidechain filter coefficients
+sc_w0 = 2 * $pi * slider5 / srate;
+sc_hp_alpha = sin(sc_w0) / 2.0;
+sc_hp_b0 =  (1 + cos(sc_w0)) / 2;
+sc_hp_b1 = -(1 + cos(sc_w0));
+sc_hp_b2 =  (1 + cos(sc_w0)) / 2;
+sc_hp_a0 =   1 + sc_hp_alpha;
+sc_hp_a1 =  -2 * cos(sc_w0);
+sc_hp_a2 =   1 - sc_hp_alpha;
+
+sc_b0 = sc_hp_b0 / sc_hp_a0; sc_b1 = sc_hp_b1 / sc_hp_a0; sc_b2 = sc_hp_b2 / sc_hp_a0;
+sc_a1 = sc_hp_a1 / sc_hp_a0; sc_a2 = sc_hp_a2 / sc_hp_a0;
+
+@sample
+// Cache inputs for parallel processing routing and digital telemetry verification
+in_l = spl0;
+in_r = spl1;
+
+// STAGE 1: Sidechain Detection Processing Filter Paths
+sc_l = spl0;
+sc_r = spl1;
+
+slider5 > 0 ? (
+  // Apply detector High-Pass processing blocks
+  out_sc_l = sc_b0 * sc_l + sc_b1 * sc_hp_l_1 + sc_b2 * sc_hp_l_2 - sc_a1 * sc_hp_l_1 - sc_a2 * sc_hp_l_2;
+  sc_hp_l_2 = sc_hp_l_1; sc_hp_l_1 = sc_l; sc_l = out_sc_l;
+  
+  out_sc_r = sc_b0 * sc_r + sc_b1 * sc_hp_r_1 + sc_b2 * sc_hp_r_2 - sc_a1 * sc_hp_r_1 - sc_a2 * sc_hp_r_2;
+  sc_hp_r_2 = sc_hp_r_1; sc_hp_r_1 = sc_r; sc_r = out_sc_r;
+);
+
+// STAGE 2: True Root-Mean-Square Energy Calculation Window Loop
+rms_sq_l += (sc_l^2 - rms_sq_l) * rms_coeff;
+rms_sq_r += (sc_r^2 - rms_sq_r) * rms_coeff;
+
+db_rms_l = rms_sq_l > 0.000001 ? 10 * log10(rms_sq_l) : -120.0;
+db_rms_r = rms_sq_r > 0.000001 ? 10 * log10(rms_sq_r) : -120.0;
+
+// Stereo Linking Logic Node Selector
+slider8 == 1 ? (
+  max_rms = max(db_rms_l, db_rms_r);
+  db_rms_l = max_rms;
+  db_rms_r = max_rms;
+);
+
+// STAGE 3: Feed-Forward Aggressive Hard-Knee Reduction Processing
+gr_target_l = 0.0;
+gr_target_r = 0.0;
+
+db_rms_l > thresh_db ? gr_target_l = (db_rms_l - thresh_db) * (1.0 - (1.0 / ratio_val));
+db_rms_r > thresh_db ? gr_target_r = (db_rms_r - thresh_db) * (1.0 - (1.0 / ratio_val));
+
+// Program-dependent VCA ballistics modified by the Softube Multipliers
+// Base hardware values: Attack ~15ms, Release ~140ms. Multipliers scale these windows directly.
+base_att_sec = 0.015 * att_mult;
+base_rel_sec = 0.140 * rel_mult;
+
+att_dyn_l = gr_target_l > env_gr_l ? 1.0 - exp(-1.0 / (srate * base_att_sec)) : 1.0 - exp(-1.0 / (srate * base_rel_sec));
+att_dyn_r = gr_target_r > env_gr_r ? 1.0 - exp(-1.0 / (srate * base_att_sec)) : 1.0 - exp(-1.0 / (srate * base_rel_sec));
+
+env_gr_l += (gr_target_l - env_gr_l) * att_dyn_l;
+env_gr_r += (gr_target_r - env_gr_r) * att_dyn_r;
+
+// Softube HF Make-Up Emulation: Lightens ratio action exclusively on top end frequencies
+slider6 == 1 ? (
+  high_freq_l = spl0 - hf_prev_l; hf_prev_l = spl0;
+  high_freq_r = spl1 - hf_prev_r; hf_prev_r = spl1;
+  
+  atten_multiplier_l = 10 ^ ((-env_gr_l * 0.82) / 20);
+  atten_multiplier_r = 10 ^ ((-env_gr_r * 0.82) / 20);
+  
+  comp_l = (spl0 - high_freq_l) * (10 ^ (-env_gr_l / 20)) + (high_freq_l * atten_multiplier_l);
+  comp_r = (spl1 - high_freq_r) * (10 ^ (-env_gr_r / 20)) + (high_freq_r * atten_multiplier_r);
+) : (
+  comp_l = spl0 * (10 ^ (-env_gr_l / 20));
+  comp_r = spl1 * (10 ^ (-env_gr_r / 20));
+);
+
+// STAGE 4: Line Stage Drive Saturation & Makeup Engine
+wet_l = comp_l * out_gain;
+wet_r = comp_r * out_gain;
+
+drive_amt > 0 ? (
+  sat_l = tanh(wet_l * (1.0 + drive_amt * 0.75)) / (1.0 + drive_amt * 0.2);
+  sat_r = tanh(wet_r * (1.0 + drive_amt * 0.75)) / (1.0 + drive_amt * 0.2);
+  wet_l = (wet_l * (1.0 - drive_amt)) + (sat_l * drive_amt);
+  wet_r = (wet_r * (1.0 - drive_amt)) + (sat_r * drive_amt);
+);
+
+// Final parallel matrix summation block
+spl0 = (in_l * dry_mix) + (wet_l * wet_mix);
+spl1 = (in_r * dry_mix) + (wet_r * wet_mix);
+
+// STAGE 5: Digital Telemetry Meter Assignment Mapping
+slider9 == 0 ? (
+  meter_target = -((env_gr_l + env_gr_r) * 0.5);
+) : (
+  avg_raw_db = 20 * log10(max(0.00001, (abs(in_l) + abs(in_r)) * 0.5));
+  meter_target = max(-40.0, avg_raw_db);
+);
+
+meter_smooth = (meter_smooth * 0.85) + (meter_target * 0.15);
+
+// ====================================================
+// SOFTUBE-STYLE VCA INDUSTRIAL BLACK COATED GUI
+// ====================================================
+@gfx 620 280
+
+// Solid Matte Charcoal Industrial Background Chassis 
+gfx_r = 0.11; gfx_g = 0.12; gfx_b = 0.13; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Safety trim frame accent line
+gfx_set(0.95, 0.73, 0.22, 0.12); // Soft corporate industrial golden accent hue tint
+gfx_rect(12, 12, gfx_w - 24, gfx_h - 24, 0);
+
+// ----------------------------------------------------
+// HIGH-ACCURACY DIGITAL BALANCED ARC RADIAL METER VU
+// ----------------------------------------------------
+m_w = 210; m_h = 105;
+m_x = gfx_w - m_w - 35; m_y = 35;
+needle_len = 82;
+
+gfx_set(0.06, 0.07, 0.08, 1.0);
+gfx_rect(m_x, m_y, m_w, m_h, 1);
+
+// Modern backlit grid panel face mask layer (Studio Cool Gray-White Tint)
+gfx_set(0.92, 0.94, 0.95, 1.0);
+gfx_rect(m_x + 5, m_y + 5, m_w - 10, m_h - 10, 1);
+
+p_x = m_x + (m_w / 2);
+p_y = m_y + m_h - 10;
+
+slider9 == 0 ? (
+  clamped_val = min(20.0, abs(meter_smooth));
+  angle = -0.42 - (clamped_val / 20.0) * 1.95;
+) : (
+  clamped_db = max(-40.0, min(0.0, meter_smooth));
+  norm_val = (clamped_db + 40.0) / 40.0;
+  angle = -2.40 + (norm_val * 2.0);
+);
+
+t_x = p_x + cos(angle) * needle_len;
+t_y = p_y + sin(angle) * needle_len;
+
+gfx_set(0.12, 0.14, 0.16, 0.65);
+gfx_setfont(1, "Arial", 10, 'b');
+
+slider9 == 0 ? (
+  gfx_x = m_x + 22;  gfx_y = m_y + 50; gfx_drawstr("-20");
+  gfx_x = m_x + 55;  gfx_y = m_y + 24; gfx_drawstr("-10");
+  gfx_x = m_x + 102; gfx_y = m_y + 14; gfx_drawstr("-5");
+  gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-2");
+  gfx_x = m_x + 180; gfx_y = m_y + 50; gfx_drawstr("0");
+  gfx_x = m_x + 15;  gfx_y = m_y + 82; gfx_drawstr("VCA COMP - ATTEN (dB)");
+) : (
+  gfx_x = m_x + 18;  gfx_y = m_y + 50; gfx_drawstr("-40");
+  gfx_x = m_x + 52;  gfx_y = m_y + 24; gfx_drawstr("-24");
+  gfx_x = m_x + 98;  gfx_y = m_y + 14; gfx_drawstr("-12");
+  gfx_x = m_x + 145; gfx_y = m_y + 24; gfx_drawstr("-6");
+  gfx_x = m_x + 182; gfx_y = m_y + 50; gfx_drawstr("0");
+  gfx_x = m_x + 15;  gfx_y = m_y + 82; gfx_drawstr("VCA COMP - INPUT dBFS");
+);
+
+// Needle Draw (Sharp High-Contrast Industrial Orange Needle)
+gfx_set(0.95, 0.45, 0.12, 1.0);
+gfx_line(p_x, p_y, t_x, t_y, 1);
+gfx_line(p_x - 1, p_y, t_x - 1, t_y, 0);
+
+// ----------------------------------------------------
+// LIVE REAL-TIME TELEMETRY SYSTEM CORE MATRIX DATA
+// ----------------------------------------------------
+gfx_set(0.06, 0.07, 0.08, 0.45);
+gfx_rect(32, 35, 290, 150, 1);
+gfx_set(0.95, 0.73, 0.22, 0.15);
+gfx_rect(32, 35, 290, 150, 0);
+
+gfx_set(0.90, 0.92, 0.94, 0.95);
+gfx_setfont(1, "Arial", 11, 'b');
+gfx_x = 48; gfx_y = 42;  gfx_drawstr(sprintf(#, "THRESHOLD:  %.1f dB", slider1));
+gfx_x = 48; gfx_y = 64;  gfx_drawstr(sprintf(#, "COMP RATIO: %.1f : 1 (Hard Knee)", slider2));
+gfx_x = 48; gfx_y = 86;  gfx_drawstr(sprintf(#, "SC FILTER:  %d Hz", slider5));
+gfx_x = 48; gfx_y = 108; gfx_drawstr(sprintf(#, "ATTACK MULT: %.1fx (Time Scale)", slider10));
+gfx_x = 48; gfx_y = 130; gfx_drawstr(sprintf(#, "RELEAS MULT: %.1fx (Time Scale)", slider11));
+gfx_x = 48; gfx_y = 152; gfx_drawstr(sprintf(#, "DRIVE AMT:  %d %% (Harmonics)", slider4));
+gfx_x = 48; gfx_y = 174; gfx_drawstr(sprintf(#, "MIX MATRIX: %d %% (Parallel Path)", slider7));
+
+// ----------------------------------------------------
+// FOOTER BRAND LABELS & STRUCTURAL ROW CONFIG
+// ----------------------------------------------------
+gfx_set(0.06, 0.07, 0.08, 0.35);
+gfx_rect(32, 205, gfx_w - 68, 42, 1);
+gfx_set(0.95, 0.73, 0.22, 0.15);
+gfx_rect(32, 205, gfx_w - 68, 42, 0);
+
+gfx_setfont(1, "Impact", 14, 'i');
+gfx_set(0.95, 0.73, 0.22, 0.9);
+gfx_x = 48; gfx_y = 219; gfx_drawstr("MOLZTER VCA-160");
+
+gfx_setfont(1, "Arial", 10, 'b');
+gfx_set(0.85, 0.88, 0.92, 0.75);
+gfx_x = 185;
+slider8 == 1 ? gfx_drawstr("DETECTOR MODE: STEREO LINKED") : gfx_drawstr("DETECTOR MODE: UNLINKED DUAL MONO");
+
+gfx_x = gfx_w - 180;
+gfx_drawstr(sprintf(#, "TOTAL OUT TRIM: %.1f dB", slider3));

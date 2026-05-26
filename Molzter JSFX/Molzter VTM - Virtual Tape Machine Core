@@ -1,0 +1,220 @@
+desc: Molzter VTM - Virtual Tape Machine Core 
+author: Molzter
+version: 1.2.0
+
+slider1:0<-12,12,0.1> Input Drive (dB)
+slider2:0<0,1,1{2 Inch 16-Track, 1/2 Inch 2-Track}> Machine Type Selection
+slider3:0<0,1,1{15 ips Low-Punch, 30 ips Hi-Fi Air}> Tape Speed (ips)
+slider4:0<0,1,1{FG456 Standard, FG9 Ultra-Output}> Tape Oxide Formulation
+slider5:-80<-100,-40,1> Vintage Tape Noise Floor (dB)
+slider6:0<-12,12,0.1> Output Trim (dB)
+
+@init
+// Filter memory states for the analog 'Head Bump' low-frequency resonances
+hb_l1 = hb_l2 = 0.0;
+hb_r1 = hb_r2 = 0.0;
+
+// High-frequency pre-emphasis/de-emphasis filters to model tape saturation behavior
+pre_l = pre_r = 0.0;
+
+// Internal random noise seed register
+noise_seed = 1973;
+
+// Stacked VU needle smoothing histories
+vu_smooth_l = 0.0;
+vu_smooth_r = 0.0;
+
+@slider
+in_gain = 10 ^ (slider1 / 20);
+out_gain = 10 ^ (slider6 / 20);
+noise_amp = 10 ^ (slider5 / 20) * 0.15;
+
+// Adjust dynamic clipping saturation factor depending on chosen oxide type
+sat_ceiling = (slider4 == 0) ? 0.85 : 1.15;
+
+// Head-bump filter calculations (Low frequency resonance simulation)
+// 15 ips creates a broader bump around 50-60Hz; 30 ips pushes it up to 80-100Hz with tighter roll-off
+hb_freq = (slider3 == 0) ? 55 : 90;
+hb_q = (slider2 == 0) ? 1.4 : 0.95; // 2" tape has more pronounced head-bump weight
+hb_omega = 2 * $pi * hb_freq / srate;
+hb_alpha = sin(hb_omega) / (2 * hb_q);
+hb_b1 = 1 - cos(hb_omega);
+hb_b0 = hb_b1 * 0.5;
+hb_a0 = 1 + hb_alpha;
+hb_a1 = -2 * cos(hb_omega);
+hb_a2 = 1 - hb_alpha;
+
+// Normalize head bump coefficients
+hb_b0 /= hb_a0; hb_b1 /= hb_a0;
+hb_a1 /= hb_a0; hb_a2 /= hb_a0;
+
+@sample
+s0_dry = spl0; s1_dry = spl1;
+
+// STAGE 1: Input Gain Drive Stage
+drv_l = spl0 * in_gain;
+drv_r = spl1 * in_gain;
+
+// STAGE 2: High Frequency Emphasis (Oxide Particle Saturation Stress-test)
+pre_l = (pre_l * 0.65) + (drv_l * 0.35);
+pre_r = (pre_r * 0.65) + (drv_r * 0.35);
+sat_in_l = drv_l + (drv_l - pre_l) * 0.5;
+sat_in_r = drv_r + (drv_r - pre_r) * 0.5;
+
+// STAGE 3: Magnetic Oxide Arc-Hyperbolic Soft Saturation & Compression
+sat_out_l = sign(sat_in_l) * (1.0 - exp(-abs(sat_in_l) / sat_ceiling)) * sat_ceiling;
+sat_out_r = sign(sat_in_r) * (1.0 - exp(-abs(sat_in_r) / sat_ceiling)) * sat_ceiling;
+
+// STAGE 4: Machine Head-Bump Low End Resonant Filtering Matrix
+out_hb_l = hb_b0 * sat_out_l + hb_b1 * hb_l1 + hb_b0 * hb_l2 - hb_a1 * hb_l1 - hb_a2 * hb_l2;
+hb_l2 = hb_l1; hb_l1 = sat_out_l;
+
+out_hb_r = hb_b0 * sat_out_r + hb_b1 * hb_r1 + hb_b0 * hb_r2 - hb_a1 * hb_r1 - hb_a2 * hb_r2;
+hb_r2 = hb_r1; hb_r1 = sat_out_r;
+
+// Reblend processed head-bump behavior back into main signal path
+proc_l = sat_out_l + out_hb_l * ((slider2 == 0) ? 0.18 : 0.09);
+proc_r = sat_out_r + out_hb_r * ((slider2 == 0) ? 0.18 : 0.09);
+
+// STAGE 5: Continuous Oxide Noise Hiss Generation Loop
+noise_seed = (noise_seed * 214013 + 2531011) & 0xFFFFFFFF;
+rand_val = ((noise_seed >> 16) & 0x7FFF) / 32768.0 - 0.5;
+hiss = rand_val * noise_amp;
+
+// STAGE 6: Master Output Stage Re-Compilation
+spl0 = (proc_l + hiss) * out_gain;
+spl1 = (proc_r + hiss) * out_gain;
+
+// STAGE 7: Stacked VU Meter Logarithmic Ballistics Tracking
+db_vu_l = 20 * log10(max(0.0001, abs(spl0)));
+db_vu_r = 20 * log10(max(0.0001, abs(spl1)));
+
+// Convert dB scale down to standard 0 VU alignment mark (-18dBFS calibration threshold)
+norm_vu_l = max(0, db_vu_l + 18);
+norm_vu_r = max(0, db_vu_r + 18);
+
+// Mimic heavy mechanical analog movement dampening curves
+vu_smooth_l = (vu_smooth_l * 0.91) + (norm_vu_l * 0.09);
+vu_smooth_r = (vu_smooth_r * 0.91) + (norm_vu_r * 0.09);
+
+
+// ====================================================
+// VTM SLATE CREAM-STEEL STACKED METER DISPLAY GRAPHICS
+// ====================================================
+@gfx 620 270
+
+// Base Panel Core Paint (Slate VTM Brushed Cream Faceplate White)
+gfx_r = 0.90; gfx_g = 0.90; gfx_b = 0.88; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Outer Frame Industrial Border Rim
+gfx_set(0.18, 0.19, 0.21, 1.0);
+gfx_rect(0, 0, gfx_w, 12);
+gfx_rect(0, gfx_h - 12, gfx_w, 12);
+gfx_rect(0, 0, 12, gfx_h);
+gfx_rect(gfx_w - 12, 0, 12, gfx_h);
+
+// Inner decorative metal division borders
+gfx_set(0.65, 0.65, 0.62, 0.5);
+gfx_line(245, 12, 245, gfx_h - 12);
+gfx_line(435, 12, 435, gfx_h - 12);
+
+// ----------------------------------------------------
+// CENTER CHASSIS SLOT: DUAL VERTICAL STACKED VU METERS
+// ----------------------------------------------------
+m_w = 166; m_h = 54;
+m_x = 257; 
+m1_y = 28;  // Left Channel Top Window Slot Position
+m2_y = 96;  // Right Channel Bottom Window Slot Position
+needle_len = 46;
+
+// --- TOP METER: LEFT CHANNEL SYSTEM DISPLAY ---
+gfx_set(0.24, 0.22, 0.20, 1.0); // Outer deep wood/plastic casing wrap
+gfx_rect(m_x, m1_y, m_w, m_h, 1);
+gfx_set(0.97, 0.93, 0.82, 1.0); // Vintage luminous vanilla paper backing tint
+gfx_rect(m_x + 3, m1_y + 3, m_w - 6, m_h - 6, 1);
+
+// Math tracking layout for upper pivot anchor point
+pivot1_x = m_x + (m_w / 2);
+pivot1_y = m1_y + m_h - 4;
+angle_l = -2.40 + (min(24, vu_smooth_l) / 24) * 2.05;
+
+tip1_x = pivot1_x + cos(angle_l) * needle_len;
+tip1_y = pivot1_y + sin(angle_l) * needle_len;
+
+// Reference marks text lines for Top Meter card background
+gfx_set(0.15, 0.12, 0.10, 0.4);
+gfx_x = m_x + 15;  gfx_y = m1_y + 26; gfx_drawstr("-20");
+gfx_x = m_x + 76;  gfx_y = m1_y + 8;  gfx_drawstr("0");
+gfx_x = m_x + 135; gfx_y = m1_y + 26; gfx_drawstr("+3");
+gfx_set(0.35, 0.05, 0.05, 0.6);
+gfx_x = m_x + 8;   gfx_y = m1_y + 40; gfx_drawstr("L CH");
+
+// Draw upper thin needle pin
+gfx_set(0.08, 0.06, 0.05, 1.0);
+gfx_line(pivot1_x, pivot1_y, tip1_x, tip1_y, 1);
+
+
+// --- BOTTOM METER: RIGHT CHANNEL SYSTEM DISPLAY ---
+gfx_set(0.24, 0.22, 0.20, 1.0);
+gfx_rect(m_x, m2_y, m_w, m_h, 1);
+gfx_set(0.97, 0.93, 0.82, 1.0);
+gfx_rect(m_x + 3, m2_y + 3, m_w - 6, m_h - 6, 1);
+
+pivot2_x = m_x + (m_w / 2);
+pivot2_y = m2_y + m_h - 4;
+angle_r = -2.40 + (min(24, vu_smooth_r) / 24) * 2.05;
+
+tip2_x = pivot2_x + cos(angle_r) * needle_len;
+tip2_y = pivot2_y + sin(angle_r) * needle_len;
+
+// Reference marks text lines for Bottom Meter card background
+gfx_set(0.15, 0.12, 0.10, 0.4);
+gfx_x = m_x + 15;  gfx_y = m2_y + 26; gfx_drawstr("-20");
+gfx_x = m_x + 76;  gfx_y = m2_y + 8;  gfx_drawstr("0");
+gfx_x = m_x + 135; gfx_y = m2_y + 26; gfx_drawstr("+3");
+gfx_set(0.35, 0.05, 0.05, 0.6);
+gfx_x = m_x + 8;   gfx_y = m2_y + 40; gfx_drawstr("R CH");
+
+// Draw lower thin needle pin
+gfx_set(0.08, 0.06, 0.05, 1.0);
+gfx_line(pivot2_x, pivot2_y, tip2_x, tip2_y, 1);
+
+
+// ----------------------------------------------------
+// HARDWARE PARAMETERS READOUT COLUMNS
+// ----------------------------------------------------
+gfx_set(0.15, 0.16, 0.18, 0.95); // Deep industrial slate text ink
+
+// Left Wing Control Section
+gfx_x = 32; gfx_y = 45;  gfx_drawstr("VIRTUAL TAPE");
+gfx_x = 32; gfx_y = 65;  gfx_drawstr("MACHINES ENGINE");
+gfx_set(0.35, 0.36, 0.38, 0.6);
+gfx_line(32, 88, 220, 88);
+
+gfx_set(0.15, 0.16, 0.18, 0.95);
+gfx_x = 32; gfx_y = 110; gfx_drawstr(sprintf(#, "INPUT DRIVE: %+.1f dB", slider1));
+gfx_x = 32; gfx_y = 145; gfx_drawstr(sprintf(#, "OUTPUT TRIM: %+.1f dB", slider6));
+
+// Right Wing Settings Selection Columns
+gfx_x = 460; gfx_y = 35;  gfx_drawstr("TAPE SETTINGS");
+gfx_set(0.35, 0.36, 0.38, 0.6);
+gfx_line(460, 56, 588, 56);
+
+gfx_set(0.15, 0.16, 0.18, 0.95);
+gfx_x = 460; gfx_y = 75;  
+slider2 == 0 ? gfx_drawstr("DECK: 2\" 16-TRACK") : gfx_drawstr("DECK: 1/2\" 2-TRACK");
+
+gfx_x = 460; gfx_y = 110; 
+slider3 == 0 ? gfx_drawstr("SPEED: 15 IPS") : gfx_drawstr("SPEED: 30 IPS");
+
+gfx_x = 460; gfx_y = 145; 
+slider4 == 0 ? gfx_drawstr("OXIDE: FG456") : gfx_drawstr("OXIDE: FG9");
+
+// Lower Technical Status Strip Footer
+gfx_set(0.15, 0.16, 0.18, 0.08);
+gfx_rect(24, 205, gfx_w - 48, 40, 1);
+
+gfx_set(0.35, 0.38, 0.42, 0.8);
+gfx_x = 40; gfx_y = 219;
+gfx_drawstr(sprintf(#, "OXIDE SATURATION CORE RUNNING || NOISE FLOOR HARMONICS: %d dB", slider5));
