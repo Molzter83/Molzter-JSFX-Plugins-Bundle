@@ -1,0 +1,65 @@
+desc: Molzter ValveKult Saturator
+
+slider1:drive=0<0,100,0.1>Drive
+slider2:out=0<-20,20,0.1>Output (dB)
+slider3:in_trim=0<-20,20,0.1>In Trim (dB)
+slider4:out_trim=0<-20,20,0.1>Out Trim (dB)
+slider5:mode=0<0,2,1{Triode,Pentode 1,Pentode 2}>Mode
+slider6:ovd=0<0,1,1{Off,On}>Overdrive
+slider7:mix=100<0,100,1>Mix (%)
+slider8:link=0<0,1,1{Off,On}>Link (Auto-Gain)
+slider9:hpf=20<20,5000,1>HPF (Hz)
+slider10:lpf=15000<2000,20000,1>LPF (Hz)
+slider11:ultra=0<0,1,1{Off,On}>Ultra-X
+
+@init
+// Manual tanh for compatibility
+function my_tanh(x) (
+  x > 20 ? 1 : (x < -20 ? -1 : (exp(2*x)-1)/(exp(2*x)+1));
+);
+
+// Biquad filter setup
+function biquad_init(f, q) (
+  w = 2 * $pi * f / srate;
+  cos_w = cos(w);
+  alpha = sin(w) / (2 * q);
+  b0 = (1 - cos_w) / 2; b1 = 1 - cos_w; b2 = (1 - cos_w) / 2;
+  a0 = 1 + alpha; a1 = -2 * cos_w; a2 = 1 - alpha;
+  b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+);
+
+@slider
+  link ? out = -drive * 0.15;
+  in_gain = 10^(in_trim/20);
+  drv_gain = 1 + (drive / 10);
+  out_gain = 10^(out/20) * 10^(out_trim/20);
+
+@sample
+  s0 = spl0 * in_gain; s1 = spl1 * in_gain;
+
+  // HPF (Pre)
+  hpf_f = hpf; q = 0.707;
+  w = 2 * $pi * hpf_f / srate; cos_w = cos(w); alpha = sin(w) / (2 * q);
+  a0 = 1 + alpha; b0 = (1 + cos_w) / 2; b1 = -(1 + cos_w); b2 = (1 + cos_w) / 2;
+  a1 = -2 * cos_w; a2 = 1 - alpha;
+  // Apply HPF (biquad direct form 1)
+  out0 = (b0/a0)*s0 + (b1/a0)*hpf_x1 + (b2/a0)*hpf_x2 - (a1/a0)*hpf_y1 - (a2/a0)*hpf_y2;
+  hpf_x2 = hpf_x1; hpf_x1 = s0; hpf_y2 = hpf_y1; hpf_y1 = out0;
+  
+  // Drive & Saturation
+  sig0 = out0 * drv_gain * (ovd ? 2.5 : 1.0);
+  mode == 0 ? sat0 = my_tanh(sig0) :
+  mode == 1 ? sat0 = my_tanh(sig0) + 0.12*sig0*sig0 :
+              sat0 = atan(sig0*1.5)/1.5 + (ovd ? 0.05*sig0 : 0);
+  ultra ? sat0 = my_tanh(sat0 * 1.2);
+
+  // LPF (Post) - (Standard Butterworth)
+  lpf_f = lpf; q = 0.707;
+  w = 2 * $pi * lpf_f / srate; cos_w = cos(w); alpha = sin(w) / (2 * q);
+  a0 = 1 + alpha; b0 = (1 - cos_w) / 2; b1 = 1 - cos_w; b2 = (1 - cos_w) / 2;
+  a1 = -2 * cos_w; a2 = 1 - alpha;
+  out0 = (b0/a0)*sat0 + (b1/a0)*lpf_x1 + (b2/a0)*lpf_x2 - (a1/a0)*lpf_y1 - (a2/a0)*lpf_y2;
+  lpf_x2 = lpf_x1; lpf_x1 = sat0; lpf_y2 = lpf_y1; lpf_y1 = out0;
+
+  spl0 = (s0 * (1 - mix/100) + out0 * (mix/100)) * out_gain;
+  spl1 = spl0; // Mono process for stereo consistency
