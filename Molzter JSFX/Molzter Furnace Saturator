@@ -1,0 +1,76 @@
+desc: Molzter Furnace Saturator 
+
+slider1:input_gain=0<-24,24,0.1>Input (dB)
+slider2:drive=0<0,24,0.1>Drive (dB)
+slider3:x_boost=0<0,1,1{Off,On}>X-Boost
+slider4:mode=0<0,2,1{456 Tape,Transformer,AX7 Tube}>Saturation Mode
+slider5:oversample=0<0,1,1{Off,On}>Oversampling
+slider6:hi_boost=0<0,1,1{Off,On}>Hi-Boost
+slider7:hpf_freq=20<20,500,1>High Pass Freq (Hz)
+slider8:mix=100<0,100,1>Mix (%)
+slider9:mid_side=0<-100,100,1>M/S Balance (Mid <-> Side)
+slider10:delta=0<0,1,1{Off,On}>Delta Mode
+slider11:out_gain=0<-24,0,0.1>Output (dB)
+
+@init
+function process_model(in, drive_val, mode_val, hg) local(val) (
+  val = in * drive_val;
+  mode_val == 0 ? (
+    val = (exp(2*val) - 1) / (exp(2*val) + 1);
+  ) : mode_val == 1 ? (
+    val = (val + 0.15 * val * val) / (1 + abs(val));
+  ) : (
+    val = val - (val * val * val / 3);
+    val = val + 0.05;
+    val = min(max(val, -1), 1);
+  );
+  val * hg;
+);
+
+last_hpf0 = 0; last_hpf1 = 0;
+prev_in0 = 0; prev_in1 = 0;
+
+@slider
+in_lin = 10^(input_gain / 20);
+boost_val = (x_boost ? 6.0 : 0.0);
+drive_lin = 10^((drive + boost_val) / 20);
+out_lin = 10^(out_gain / 20);
+coeff = exp(-2 * $pi * hpf_freq / srate);
+hi_gain = hi_boost ? 1.2 : 1.0; 
+
+@sample
+// 1. Capture pure dry signal (before any processing)
+dry0 = spl0; dry1 = spl1;
+
+// 2. Apply Input Gain for the processing path
+curr0 = dry0 * in_lin;
+curr1 = dry1 * in_lin;
+
+// 3. M/S Matrix
+mid = (curr0 + curr1) * 0.5;
+side = (curr0 - curr1) * 0.5;
+mid *= (1.0 - (mid_side / 100));
+side *= (1.0 + (mid_side / 100));
+
+// 4. Filter and Saturate
+last_hpf0 = coeff * last_hpf0 + (1 - coeff) * mid;
+mid_drive = mid - last_hpf0;
+last_hpf1 = coeff * last_hpf1 + (1 - coeff) * side;
+side_drive = side - last_hpf1;
+
+oversample ? (
+  sat_mid = process_model((mid_drive + prev_in0) * 0.5, drive_lin, mode, hi_gain);
+  sat_side = process_model((side_drive + prev_in1) * 0.5, drive_lin, mode, hi_gain);
+) : (
+  sat_mid = process_model(mid_drive, drive_lin, mode, hi_gain);
+  sat_side = process_model(side_drive, drive_lin, mode, hi_gain);
+);
+prev_in0 = mid_drive; prev_in1 = side_drive;
+
+// 5. Final Output Reconstruction
+wet0 = (sat_mid + sat_side) * out_lin;
+wet1 = (sat_mid - sat_side) * out_lin;
+
+// 6. Final Mix (Blends dry0/dry1 with wet0/wet1)
+spl0 = delta ? (wet0 - dry0) : (wet0 * (mix/100) + dry0 * (1 - mix/100));
+spl1 = delta ? (wet1 - dry1) : (wet1 * (mix/100) + dry1 * (1 - mix/100));
